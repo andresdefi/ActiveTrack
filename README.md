@@ -5,10 +5,10 @@ Lightweight macOS menu bar app to manually track active time on your laptop. Sta
 ## Features
 
 - **Menu bar popover** — start/pause timer, see today's total at a glance
-- **Live indicator** — red dot + elapsed time in the menu bar when running
+- **Live indicator** — red dot + elapsed time when running, yellow dot + time when paused
 - **Auto-pause on sleep** — closing the lid pauses the timer automatically
-- **Midnight splitting** — intervals crossing midnight are split between days
-- **Survives restarts** — open intervals recover automatically on launch
+- **Midnight rollover** — running timer auto-restarts at midnight, saving the previous day's time
+- **Survives restarts** — open intervals recover automatically on launch, including cross-day recovery
 - **Dashboard** — day list sidebar with daily/weekly/monthly bar charts
 - **Persistent storage** — all data stored locally with SwiftData
 
