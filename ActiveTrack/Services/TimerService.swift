@@ -9,6 +9,7 @@ final class TimerService {
     private(set) var currentIntervalElapsed: TimeInterval = 0
 
     private var timer: Timer?
+    private var midnightTimer: Timer?
     private var currentInterval: ActiveInterval?
     private var persistenceService: PersistenceService?
     private var sleepObserver: Any?
@@ -23,6 +24,7 @@ final class TimerService {
         observeSleep()
         recoverOpenInterval()
         refreshTodayTotal()
+        scheduleMidnightRollover()
     }
 
     func start() {
@@ -86,6 +88,11 @@ final class TimerService {
             currentInterval = openInterval
             isRunning = true
             currentIntervalElapsed = Date.now.timeIntervalSince(openInterval.startDate)
+
+            if !Calendar.current.isDateInToday(openInterval.startDate) {
+                handleMidnightRollover()
+            }
+
             startTicking()
         }
     }
@@ -107,9 +114,34 @@ final class TimerService {
         guard let interval = currentInterval else { return }
         currentIntervalElapsed = Date.now.timeIntervalSince(interval.startDate)
 
-        let calendar = Calendar.current
-        if !calendar.isDateInToday(interval.startDate) {
-            refreshTodayTotal()
+        if !Calendar.current.isDateInToday(interval.startDate) {
+            handleMidnightRollover()
         }
+    }
+
+    private func scheduleMidnightRollover() {
+        midnightTimer?.invalidate()
+        let calendar = Calendar.current
+        guard let tomorrow = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: .now)) else { return }
+        let delay = tomorrow.timeIntervalSince(.now)
+        midnightTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            self?.handleMidnightRollover()
+        }
+        RunLoop.current.add(midnightTimer!, forMode: .common)
+    }
+
+    private func handleMidnightRollover() {
+        if isRunning, let persistence = persistenceService, let interval = currentInterval {
+            let todayStart = Calendar.current.startOfDay(for: .now)
+
+            persistence.closeInterval(interval, endDate: todayStart)
+
+            let newInterval = persistence.createInterval(startDate: todayStart)
+            currentInterval = newInterval
+            currentIntervalElapsed = Date.now.timeIntervalSince(todayStart)
+        }
+
+        refreshTodayTotal()
+        scheduleMidnightRollover()
     }
 }

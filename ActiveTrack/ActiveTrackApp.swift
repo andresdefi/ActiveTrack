@@ -29,6 +29,17 @@ struct ActiveTrackApp: App {
         return image
     }()
 
+    private static let yellowDotImage: NSImage = {
+        let size = NSSize(width: 7, height: 7)
+        let image = NSImage(size: size, flipped: false) { rect in
+            NSColor.systemYellow.setFill()
+            NSBezierPath(ovalIn: rect).fill()
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }()
+
     var body: some Scene {
         MenuBarExtra {
             MenuBarPopoverView(timerService: timerService, persistenceService: persistenceService)
@@ -36,6 +47,11 @@ struct ActiveTrackApp: App {
             if timerService.isRunning {
                 HStack(spacing: 4) {
                     Image(nsImage: Self.redDotImage)
+                    Text(timerService.displayTime.compactFormatted)
+                }
+            } else if timerService.todayTotal > 0 {
+                HStack(spacing: 4) {
+                    Image(nsImage: Self.yellowDotImage)
                     Text(timerService.displayTime.compactFormatted)
                 }
             } else {
