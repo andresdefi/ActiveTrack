@@ -1,0 +1,34 @@
+import SwiftUI
+
+enum ChartPeriod: String, CaseIterable {
+    case daily = "Daily"
+    case weekly = "Weekly"
+    case monthly = "Monthly"
+}
+
+struct ChartContainerView: View {
+    let persistenceService: PersistenceService
+    @State private var selectedPeriod: ChartPeriod = .daily
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Picker("Period", selection: $selectedPeriod) {
+                ForEach(ChartPeriod.allCases, id: \.self) { period in
+                    Text(period.rawValue).tag(period)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 300)
+
+            switch selectedPeriod {
+            case .daily:
+                DailyChartView(persistenceService: persistenceService)
+            case .weekly:
+                WeeklyChartView(persistenceService: persistenceService)
+            case .monthly:
+                MonthlyChartView(persistenceService: persistenceService)
+            }
+        }
+        .padding()
+    }
+}

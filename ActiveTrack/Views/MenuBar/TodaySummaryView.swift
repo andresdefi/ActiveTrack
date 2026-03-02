@@ -1,0 +1,29 @@
+import SwiftUI
+
+struct TodaySummaryView: View {
+    @Bindable var timerService: TimerService
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Text("Today")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text(timerService.displayTime.formattedHoursMinutesSeconds)
+                .font(.system(.title, design: .monospaced, weight: .medium))
+                .contentTransition(.numericText())
+                .animation(.default, value: timerService.displayTime)
+
+            if timerService.isRunning {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(.green)
+                        .frame(width: 6, height: 6)
+                    Text("Running")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+}
