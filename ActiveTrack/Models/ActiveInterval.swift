@@ -15,7 +15,7 @@ final class ActiveInterval {
 
     var duration: TimeInterval {
         let end = endDate ?? .now
-        return end.timeIntervalSince(startDate)
+        return max(0, end.timeIntervalSince(startDate))
     }
 
     var isRunning: Bool {

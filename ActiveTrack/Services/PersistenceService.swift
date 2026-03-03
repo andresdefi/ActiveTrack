@@ -48,7 +48,8 @@ final class PersistenceService {
 
     func fetchOpenInterval() -> ActiveInterval? {
         let descriptor = FetchDescriptor<ActiveInterval>(
-            predicate: #Predicate { $0.endDate == nil }
+            predicate: #Predicate { $0.endDate == nil },
+            sortBy: [SortDescriptor(\.startDate, order: .reverse)]
         )
         return try? modelContext.fetch(descriptor).first
     }

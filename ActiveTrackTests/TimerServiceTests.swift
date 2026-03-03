@@ -555,6 +555,67 @@ final class TimerServiceTests: XCTestCase {
         XCTAssertEqual(newTimer.currentIntervalElapsed, 0)
     }
 
+    // MARK: - Orphaned Interval Handling
+
+    func testStartCleansOrphanedOpenIntervals() {
+        // Simulate crash scenario: an old open interval exists in the DB
+        let staleInterval = ActiveInterval(startDate: Date.now.addingTimeInterval(-86400))
+        context.insert(staleInterval)
+        try! context.save()
+
+        // User starts a fresh timer — the stale interval should be cleaned up
+        timer.start()
+
+        let all = persistence.fetchAllIntervals()
+        let openCount = all.filter { $0.endDate == nil }.count
+        XCTAssertEqual(openCount, 1,
+                       "Starting a timer should leave exactly 1 open interval, not 2")
+
+        // The open interval should be the new one, not the stale one
+        let open = persistence.fetchOpenInterval()
+        XCTAssertNotNil(open)
+        XCTAssertGreaterThan(open!.startDate, Date.now.addingTimeInterval(-5),
+                             "The open interval should be the newly created one")
+    }
+
+    func testStartClosesOrphanedIntervalWithCorrectEndDate() {
+        // An orphaned interval from 2 hours ago
+        let staleStart = Date.now.addingTimeInterval(-7200)
+        let staleInterval = ActiveInterval(startDate: staleStart)
+        context.insert(staleInterval)
+        try! context.save()
+
+        timer.start()
+
+        // The stale interval should now be closed
+        let all = persistence.fetchAllIntervals()
+        let closed = all.first { $0.startDate == staleStart }
+        XCTAssertNotNil(closed)
+        XCTAssertNotNil(closed!.endDate,
+                        "Orphaned open interval should be closed when a new timer starts")
+    }
+
+    func testRecoveryWithMultipleOpenIntervalsPicksMostRecent() {
+        // Multiple orphaned open intervals — recovery should use the most recent
+        let calendar = Calendar.current
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: .now))!
+
+        let oldInterval = ActiveInterval(startDate: yesterday)
+        let recentInterval = ActiveInterval(startDate: Date.now.addingTimeInterval(-600))
+
+        context.insert(oldInterval)
+        context.insert(recentInterval)
+        try! context.save()
+
+        let newTimer = TimerService()
+        newTimer.configure(persistenceService: persistence)
+
+        // Should be running with the most recent interval's elapsed time (~10 min, not ~24h)
+        XCTAssertTrue(newTimer.isRunning)
+        XCTAssertLessThan(newTimer.currentIntervalElapsed, 3600,
+                          "Should recover the most recent interval, not a day-old orphan")
+    }
+
     func testRecoveryPreservesCompletedIntervalsInTodayTotal() {
         let calendar = Calendar.current
         let todayStart = calendar.startOfDay(for: .now)

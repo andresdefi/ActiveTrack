@@ -30,6 +30,11 @@ final class TimerService {
     func start() {
         guard let persistence = persistenceService, !isRunning else { return }
 
+        // Close any orphaned open intervals left by a previous crash or force-quit
+        while let orphan = persistence.fetchOpenInterval() {
+            persistence.closeInterval(orphan)
+        }
+
         refreshTodayTotal()
         let interval = persistence.createInterval()
         currentInterval = interval
