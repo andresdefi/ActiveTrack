@@ -1,6 +1,6 @@
 # ActiveTrack
 
-Lightweight macOS menu bar app to manually track active time on your laptop. Start when working, pause when stepping away. No daily resets — time is attributed to whichever calendar day it occurs on.
+Lightweight macOS menu bar app to manually track active time on your laptop. Start when working, pause when stepping away. No daily resets, time is attributed to whichever calendar day it occurs on.
 
 ## Features
 
