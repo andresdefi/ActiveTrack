@@ -70,15 +70,27 @@ final class TimerService {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.pause()
+            self?.handleSleep()
         }
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.refreshTodayTotal()
+            self?.handleWake()
         }
+    }
+
+    private func handleSleep() {
+        pause()
+    }
+
+    private func handleWake() {
+        // Reschedule the midnight timer in case its fire date passed during sleep.
+        // The guard in handleMidnightRollover protects against stale fires,
+        // but rescheduling here avoids the stale fire altogether.
+        scheduleMidnightRollover()
+        refreshTodayTotal()
     }
 
     private func recoverOpenInterval() {
@@ -132,6 +144,15 @@ final class TimerService {
 
     private func handleMidnightRollover() {
         if isRunning, let persistence = persistenceService, let interval = currentInterval {
+            // Only split the interval if it actually started before today.
+            // This guards against the timer firing late (e.g. after system wake)
+            // when the current interval is entirely within today.
+            guard !Calendar.current.isDateInToday(interval.startDate) else {
+                refreshTodayTotal()
+                scheduleMidnightRollover()
+                return
+            }
+
             let todayStart = Calendar.current.startOfDay(for: .now)
 
             persistence.closeInterval(interval, endDate: todayStart)
