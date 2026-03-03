@@ -81,11 +81,13 @@ final class TimerService {
         }
     }
 
-    private func handleSleep() {
+    // Internal for @testable access in tests
+    func handleSleep() {
         pause()
     }
 
-    private func handleWake() {
+    // Internal for @testable access in tests
+    func handleWake() {
         // Reschedule the midnight timer in case its fire date passed during sleep.
         // The guard in handleMidnightRollover protects against stale fires,
         // but rescheduling here avoids the stale fire altogether.
@@ -142,7 +144,8 @@ final class TimerService {
         RunLoop.current.add(midnightTimer!, forMode: .common)
     }
 
-    private func handleMidnightRollover() {
+    // Internal for @testable access in tests
+    func handleMidnightRollover() {
         if isRunning, let persistence = persistenceService, let interval = currentInterval {
             // Only split the interval if it actually started before today.
             // This guards against the timer firing late (e.g. after system wake)

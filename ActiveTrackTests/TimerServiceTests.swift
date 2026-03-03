@@ -26,6 +26,8 @@ final class TimerServiceTests: XCTestCase {
         super.tearDown()
     }
 
+    // MARK: - Basic State
+
     func testInitialState() {
         XCTAssertFalse(timer.isRunning)
         XCTAssertEqual(timer.displayTime, 0, accuracy: 1)
@@ -208,5 +210,379 @@ final class TimerServiceTests: XCTestCase {
         let closed = all.first { $0.endDate != nil }
         XCTAssertNotNil(closed)
         XCTAssertEqual(closed!.startDate, start)
+    }
+
+    // MARK: - Midnight Rollover Guard (the bug fix)
+
+    func testMidnightRolloverIgnoredForTodayInterval() {
+        // This is the exact bug scenario: timer running with a today-interval,
+        // handleMidnightRollover fires erroneously (e.g. stale timer after wake).
+        timer.start()
+
+        let open = persistence.fetchOpenInterval()
+        XCTAssertNotNil(open)
+        let originalStartDate = open!.startDate
+
+        // Capture state before the erroneous rollover
+        let displayBefore = timer.displayTime
+
+        // Simulate the stale midnight timer firing
+        timer.handleMidnightRollover()
+
+        // The interval should NOT have been split
+        XCTAssertTrue(timer.isRunning)
+        let openAfter = persistence.fetchOpenInterval()
+        XCTAssertNotNil(openAfter)
+        XCTAssertEqual(openAfter!.startDate, originalStartDate,
+                       "Interval startDate should not change when rollover fires for a today-interval")
+
+        // displayTime should remain reasonable (not jump to wall-clock time)
+        let displayAfter = timer.displayTime
+        XCTAssertEqual(displayAfter, displayBefore, accuracy: 2,
+                       "displayTime should not jump after an erroneous rollover")
+    }
+
+    func testMidnightRolloverDoesNotCreateBackwardsInterval() {
+        // Start and run for a moment, then fire rollover
+        timer.start()
+
+        let exp = expectation(description: "tick")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { exp.fulfill() }
+        wait(for: [exp], timeout: 2)
+
+        timer.handleMidnightRollover()
+
+        // No interval should ever have endDate before startDate
+        let all = persistence.fetchAllIntervals()
+        for interval in all {
+            if let endDate = interval.endDate {
+                XCTAssertGreaterThanOrEqual(endDate, interval.startDate,
+                    "Interval endDate (\(endDate)) must not be before startDate (\(interval.startDate))")
+            }
+        }
+    }
+
+    func testRepeatedMidnightRolloverDoesNotCorruptState() {
+        // Simulate the rollover firing multiple times (e.g. scheduled timer + tick both trigger)
+        timer.start()
+
+        let open = persistence.fetchOpenInterval()!
+        let originalStart = open.startDate
+
+        timer.handleMidnightRollover()
+        timer.handleMidnightRollover()
+        timer.handleMidnightRollover()
+
+        // Should still be running with the same interval
+        XCTAssertTrue(timer.isRunning)
+        let openAfter = persistence.fetchOpenInterval()
+        XCTAssertNotNil(openAfter)
+        XCTAssertEqual(openAfter!.startDate, originalStart)
+
+        // Only 1 open interval should exist
+        let all = persistence.fetchAllIntervals()
+        let openCount = all.filter { $0.endDate == nil }.count
+        XCTAssertEqual(openCount, 1, "Repeated rollover should not create extra open intervals")
+    }
+
+    func testRolloverStillWorksForYesterdayInterval() {
+        // Ensure the guard doesn't break legitimate cross-day rollover
+        let calendar = Calendar.current
+        let yesterdayStart = calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: .now))!
+        let yesterdayEvening = calendar.date(byAdding: .hour, value: 23, to: yesterdayStart)!
+
+        let interval = ActiveInterval(startDate: yesterdayEvening)
+        context.insert(interval)
+        try! context.save()
+
+        let newTimer = TimerService()
+        newTimer.configure(persistenceService: persistence)
+
+        // The old interval should be closed at midnight
+        let all = persistence.fetchAllIntervals()
+        let closed = all.first { $0.endDate != nil }
+        XCTAssertNotNil(closed, "Yesterday's interval should be closed by rollover")
+
+        // And a new one should exist for today
+        let open = persistence.fetchOpenInterval()
+        XCTAssertNotNil(open)
+        XCTAssertTrue(calendar.isDateInToday(open!.startDate))
+    }
+
+    // MARK: - Sleep / Wake
+
+    func testSleepPausesRunningTimer() {
+        timer.start()
+        XCTAssertTrue(timer.isRunning)
+
+        timer.handleSleep()
+
+        XCTAssertFalse(timer.isRunning, "Timer should be paused after sleep")
+        XCTAssertNil(persistence.fetchOpenInterval(), "Open interval should be closed on sleep")
+    }
+
+    func testSleepWhenAlreadyPausedIsHarmless() {
+        // Timer not running, sleep fires — should not crash or corrupt
+        timer.handleSleep()
+        XCTAssertFalse(timer.isRunning)
+        XCTAssertEqual(timer.displayTime, 0, accuracy: 1)
+    }
+
+    func testWakeRefreshesTodayTotal() {
+        // Start, pause to create a completed interval
+        timer.start()
+        let exp = expectation(description: "tick")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { exp.fulfill() }
+        wait(for: [exp], timeout: 2)
+        timer.pause()
+
+        let totalBefore = timer.todayTotal
+        XCTAssertGreaterThan(totalBefore, 0)
+
+        // Simulate wake — todayTotal should still reflect completed intervals
+        timer.handleWake()
+        XCTAssertEqual(timer.todayTotal, totalBefore, accuracy: 1,
+                       "Wake should preserve todayTotal for completed intervals")
+    }
+
+    func testSleepWakeCyclePreservesCompletedIntervals() {
+        // Simulate: work, sleep, wake
+        timer.start()
+        let exp = expectation(description: "tick")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { exp.fulfill() }
+        wait(for: [exp], timeout: 2)
+
+        timer.handleSleep()  // pauses
+        timer.handleWake()   // refreshes
+
+        // The completed interval should be counted in todayTotal
+        XCTAssertGreaterThan(timer.todayTotal, 0,
+                             "Completed intervals should persist through sleep/wake")
+        XCTAssertFalse(timer.isRunning, "Timer should still be paused after wake")
+    }
+
+    // MARK: - Display Time Accuracy
+
+    func testDisplayTimeNeverNegative() {
+        // Fresh start
+        XCTAssertGreaterThanOrEqual(timer.displayTime, 0)
+
+        // While running
+        timer.start()
+        XCTAssertGreaterThanOrEqual(timer.displayTime, 0)
+
+        // After pause
+        timer.pause()
+        XCTAssertGreaterThanOrEqual(timer.displayTime, 0)
+
+        // After rollover attempt
+        timer.start()
+        timer.handleMidnightRollover()
+        XCTAssertGreaterThanOrEqual(timer.displayTime, 0)
+    }
+
+    func testDisplayTimeAccumulatesAcrossPauseResumeCycles() {
+        timer.start()
+        let exp1 = expectation(description: "first session")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { exp1.fulfill() }
+        wait(for: [exp1], timeout: 2)
+        timer.pause()
+
+        let afterFirst = timer.displayTime
+        XCTAssertGreaterThan(afterFirst, 0)
+
+        timer.start()
+        let exp2 = expectation(description: "second session")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { exp2.fulfill() }
+        wait(for: [exp2], timeout: 2)
+        timer.pause()
+
+        let afterSecond = timer.displayTime
+        XCTAssertGreaterThan(afterSecond, afterFirst,
+                             "displayTime should grow across pause/resume cycles")
+    }
+
+    func testTodayTotalExcludesRunningInterval() {
+        timer.start()
+        let exp = expectation(description: "tick")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { exp.fulfill() }
+        wait(for: [exp], timeout: 2)
+
+        // While the timer is running, todayTotal should only include completed intervals
+        timer.refreshTodayTotal()
+        XCTAssertEqual(timer.todayTotal, 0, accuracy: 0.1,
+                       "todayTotal should exclude the currently running interval")
+
+        // But displayTime should still show elapsed time
+        XCTAssertGreaterThan(timer.displayTime, 0)
+    }
+
+    func testPauseResumeUpdatesTodayTotal() {
+        // First session
+        timer.start()
+        let exp = expectation(description: "tick")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { exp.fulfill() }
+        wait(for: [exp], timeout: 2)
+        timer.pause()
+
+        let todayAfterPause = timer.todayTotal
+        XCTAssertGreaterThan(todayAfterPause, 0,
+                             "todayTotal should include the just-completed interval")
+
+        // Second session — todayTotal should carry forward
+        timer.start()
+        XCTAssertEqual(timer.todayTotal, todayAfterPause, accuracy: 0.5,
+                       "todayTotal should include previous sessions when starting a new one")
+    }
+
+    func testDisplayTimeBoundedByReasonableElapsed() {
+        // displayTime should never exceed the time since the timer was first started
+        let startTime = Date.now
+        timer.start()
+
+        let exp = expectation(description: "tick")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { exp.fulfill() }
+        wait(for: [exp], timeout: 2)
+
+        let maxReasonable = Date.now.timeIntervalSince(startTime) + 2 // small tolerance
+        XCTAssertLessThan(timer.displayTime, maxReasonable,
+                          "displayTime should not exceed actual wall-clock elapsed time since start")
+    }
+
+    // MARK: - Data Integrity
+
+    func testOnlyOneOpenIntervalAtATime() {
+        timer.start()
+        timer.pause()
+        timer.start()
+
+        let all = persistence.fetchAllIntervals()
+        let openCount = all.filter { $0.endDate == nil }.count
+        XCTAssertEqual(openCount, 1, "There should be exactly 1 open interval when running")
+    }
+
+    func testNoOpenIntervalsWhenPaused() {
+        timer.start()
+        timer.pause()
+
+        let all = persistence.fetchAllIntervals()
+        let openCount = all.filter { $0.endDate == nil }.count
+        XCTAssertEqual(openCount, 0, "There should be 0 open intervals when paused")
+    }
+
+    func testAllClosedIntervalsHaveValidDateRange() {
+        // Run several cycles
+        for _ in 0..<3 {
+            timer.start()
+            let exp = expectation(description: "tick")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exp.fulfill() }
+            wait(for: [exp], timeout: 1)
+            timer.pause()
+        }
+
+        let all = persistence.fetchAllIntervals()
+        for interval in all {
+            if let endDate = interval.endDate {
+                XCTAssertGreaterThanOrEqual(endDate, interval.startDate,
+                    "Closed interval must have endDate >= startDate")
+                XCTAssertGreaterThan(endDate.timeIntervalSince(interval.startDate), 0,
+                    "Closed interval must have positive duration")
+            }
+        }
+    }
+
+    func testRapidToggleDoesNotCorruptState() {
+        for _ in 0..<10 {
+            timer.toggle()
+        }
+
+        // After an even number of toggles, timer should be paused (started paused)
+        XCTAssertFalse(timer.isRunning)
+
+        let all = persistence.fetchAllIntervals()
+        let openCount = all.filter { $0.endDate == nil }.count
+        XCTAssertEqual(openCount, 0, "All intervals should be closed after even number of toggles")
+
+        // Every closed interval must have valid date range
+        for interval in all {
+            if let endDate = interval.endDate {
+                XCTAssertGreaterThanOrEqual(endDate, interval.startDate)
+            }
+        }
+    }
+
+    // MARK: - Recovery Edge Cases
+
+    func testRecoveryOfTodayIntervalDoesNotRollover() {
+        // Simulate: app quit without pausing, relaunched same day
+        let oneHourAgo = Date.now.addingTimeInterval(-3600)
+        let interval = ActiveInterval(startDate: oneHourAgo)
+        context.insert(interval)
+        try! context.save()
+
+        let newTimer = TimerService()
+        newTimer.configure(persistenceService: persistence)
+
+        // Should recover without rollover
+        XCTAssertTrue(newTimer.isRunning)
+
+        let open = persistence.fetchOpenInterval()
+        XCTAssertNotNil(open)
+        XCTAssertEqual(open!.startDate, oneHourAgo,
+                       "Today's interval should not be modified by recovery")
+
+        // Elapsed should be ~1 hour, not time since midnight
+        XCTAssertEqual(newTimer.currentIntervalElapsed, 3600, accuracy: 10)
+
+        // displayTime should be ~1 hour
+        let todayStart = Calendar.current.startOfDay(for: .now)
+        let timeSinceMidnight = Date.now.timeIntervalSince(todayStart)
+        XCTAssertLessThan(newTimer.displayTime, timeSinceMidnight,
+                          "displayTime should be less than wall-clock time (not showing time since midnight)")
+    }
+
+    func testRecoveryWithNoOpenInterval() {
+        // All intervals are closed — nothing to recover
+        let interval = ActiveInterval(startDate: Date.now.addingTimeInterval(-3600),
+                                      endDate: Date.now.addingTimeInterval(-1800))
+        context.insert(interval)
+        try! context.save()
+
+        let newTimer = TimerService()
+        newTimer.configure(persistenceService: persistence)
+
+        XCTAssertFalse(newTimer.isRunning, "Should not be running when all intervals are closed")
+        XCTAssertEqual(newTimer.currentIntervalElapsed, 0)
+    }
+
+    func testRecoveryPreservesCompletedIntervalsInTodayTotal() {
+        let calendar = Calendar.current
+        let todayStart = calendar.startOfDay(for: .now)
+
+        // Two completed intervals from earlier today (1h each)
+        let i1Start = todayStart.addingTimeInterval(3600)  // 01:00
+        let i1End = todayStart.addingTimeInterval(7200)     // 02:00
+        let i2Start = todayStart.addingTimeInterval(10800)  // 03:00
+        let i2End = todayStart.addingTimeInterval(14400)     // 04:00
+
+        let i1 = ActiveInterval(startDate: i1Start, endDate: i1End)
+        let i2 = ActiveInterval(startDate: i2Start, endDate: i2End)
+
+        // One open interval (still running)
+        let i3 = ActiveInterval(startDate: Date.now.addingTimeInterval(-1800))
+
+        context.insert(i1)
+        context.insert(i2)
+        context.insert(i3)
+        try! context.save()
+
+        let newTimer = TimerService()
+        newTimer.configure(persistenceService: persistence)
+
+        // todayTotal should include the 2 completed intervals (2h = 7200s)
+        XCTAssertEqual(newTimer.todayTotal, 7200, accuracy: 5)
+
+        // displayTime should be todayTotal + current elapsed (~30 min)
+        XCTAssertEqual(newTimer.displayTime, 7200 + 1800, accuracy: 10)
     }
 }
