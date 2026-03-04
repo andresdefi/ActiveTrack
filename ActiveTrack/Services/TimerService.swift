@@ -66,15 +66,16 @@ final class TimerService {
         do {
             try persistence.closeInterval(interval)
             lastError = nil
+            stopTicking()
+            isRunning = false
+            currentInterval = nil
+            currentIntervalElapsed = 0
+            refreshTodayTotal()
         } catch {
             logger.error("Failed to close interval: \(error.localizedDescription)")
             lastError = error as? PersistenceError
+            // Keep timer running so user knows data isn't saved yet
         }
-        stopTicking()
-        isRunning = false
-        currentInterval = nil
-        currentIntervalElapsed = 0
-        refreshTodayTotal()
     }
 
     func toggle() {

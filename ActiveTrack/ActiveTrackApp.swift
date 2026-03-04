@@ -46,25 +46,38 @@ struct ActiveTrackApp: App {
     }
 
     private static func migrateDefaultStoreIfNeeded(to newURL: URL) {
-        guard !FileManager.default.fileExists(atPath: newURL.path) else { return }
-
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let defaultStore = appSupport.appendingPathComponent("default.store")
 
         guard FileManager.default.fileExists(atPath: defaultStore.path) else { return }
 
-        do {
-            try FileManager.default.moveItem(at: defaultStore, to: newURL)
-            logger.info("Migrated default.store to ActiveTrack.store")
+        // If our explicit store already exists, remove it first so the migration
+        // replaces it with the default.store data (handles the case where an empty
+        // store was created by a previous build before the data was populated).
+        if FileManager.default.fileExists(atPath: newURL.path) {
+            do {
+                for suffix in ["", "-wal", "-shm"] {
+                    let file = URL(fileURLWithPath: newURL.path + suffix)
+                    if FileManager.default.fileExists(atPath: file.path) {
+                        try FileManager.default.removeItem(at: file)
+                    }
+                }
+            } catch {
+                logger.error("Failed to remove existing store before migration: \(error.localizedDescription)")
+                return
+            }
+        }
 
-            // Also move WAL and SHM files if they exist
-            for suffix in ["-wal", "-shm"] {
+        do {
+            // Move all SQLite files atomically as a group
+            for suffix in ["", "-wal", "-shm"] {
                 let src = URL(fileURLWithPath: defaultStore.path + suffix)
                 let dst = URL(fileURLWithPath: newURL.path + suffix)
                 if FileManager.default.fileExists(atPath: src.path) {
                     try FileManager.default.moveItem(at: src, to: dst)
                 }
             }
+            logger.info("Migrated default.store to ActiveTrack.store")
         } catch {
             logger.error("Failed to migrate default.store: \(error.localizedDescription)")
         }
