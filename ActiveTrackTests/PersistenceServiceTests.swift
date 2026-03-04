@@ -24,33 +24,50 @@ final class PersistenceServiceTests: XCTestCase {
 
     // MARK: - CRUD
 
-    func testCreateInterval() {
-        let interval = service.createInterval()
+    func testCreateInterval() throws {
+        let interval = try service.createInterval()
         XCTAssertNil(interval.endDate)
         XCTAssertNotNil(interval.startDate)
     }
 
-    func testCloseInterval() {
-        let interval = service.createInterval()
-        service.closeInterval(interval)
+    func testCloseInterval() throws {
+        let interval = try service.createInterval()
+        try service.closeInterval(interval)
         XCTAssertNotNil(interval.endDate)
     }
 
-    func testFetchOpenInterval() {
+    func testFetchOpenInterval() throws {
         XCTAssertNil(service.fetchOpenInterval())
-        let interval = service.createInterval()
+        let interval = try service.createInterval()
         XCTAssertNotNil(service.fetchOpenInterval())
-        service.closeInterval(interval)
+        try service.closeInterval(interval)
         XCTAssertNil(service.fetchOpenInterval())
     }
 
-    func testDeleteInterval() {
-        let interval = service.createInterval()
-        service.closeInterval(interval)
+    func testDeleteInterval() throws {
+        let interval = try service.createInterval()
+        try service.closeInterval(interval)
         let countBefore = service.fetchAllIntervals().count
-        service.deleteInterval(interval)
+        try service.deleteInterval(interval)
         let countAfter = service.fetchAllIntervals().count
         XCTAssertEqual(countAfter, countBefore - 1)
+    }
+
+    // MARK: - Save Propagation
+
+    func testCreateIntervalDoesNotThrow() {
+        XCTAssertNoThrow(try service.createInterval())
+    }
+
+    func testCloseIntervalDoesNotThrow() throws {
+        let interval = try service.createInterval()
+        XCTAssertNoThrow(try service.closeInterval(interval))
+    }
+
+    func testDeleteIntervalDoesNotThrow() throws {
+        let interval = try service.createInterval()
+        try service.closeInterval(interval)
+        XCTAssertNoThrow(try service.deleteInterval(interval))
     }
 
     // MARK: - Daily Duration

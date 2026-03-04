@@ -89,6 +89,31 @@ final class TimerServiceTests: XCTestCase {
         XCTAssertFalse(timer.isRunning)
     }
 
+    // MARK: - Error State
+
+    func testLastErrorNilAfterSuccessfulStart() {
+        timer.start()
+        XCTAssertNil(timer.lastError)
+    }
+
+    func testLastErrorNilAfterSuccessfulPause() {
+        timer.start()
+        timer.pause()
+        XCTAssertNil(timer.lastError)
+    }
+
+    func testErrorStateDoesNotCorruptTimerState() {
+        // After a successful start/pause cycle, timer state should be clean
+        timer.start()
+        XCTAssertTrue(timer.isRunning)
+        XCTAssertNil(timer.lastError)
+
+        timer.pause()
+        XCTAssertFalse(timer.isRunning)
+        XCTAssertNil(timer.lastError)
+        XCTAssertEqual(timer.currentIntervalElapsed, 0)
+    }
+
     // MARK: - Midnight Rollover
 
     func testRolloverSplitsYesterdayInterval() {

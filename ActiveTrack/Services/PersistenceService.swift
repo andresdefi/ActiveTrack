@@ -1,6 +1,17 @@
 import Foundation
 import SwiftData
 
+enum PersistenceError: Error, Equatable {
+    case saveFailed(underlying: String)
+
+    static func == (lhs: PersistenceError, rhs: PersistenceError) -> Bool {
+        switch (lhs, rhs) {
+        case let (.saveFailed(a), .saveFailed(b)):
+            return a == b
+        }
+    }
+}
+
 struct DailyTotal: Identifiable {
     let date: Date
     let duration: TimeInterval
@@ -29,21 +40,34 @@ final class PersistenceService {
 
     // MARK: - CRUD
 
-    func createInterval(startDate: Date = .now) -> ActiveInterval {
+    @discardableResult
+    func createInterval(startDate: Date = .now) throws -> ActiveInterval {
         let interval = ActiveInterval(startDate: startDate)
         modelContext.insert(interval)
-        try? modelContext.save()
+        do {
+            try modelContext.save()
+        } catch {
+            throw PersistenceError.saveFailed(underlying: error.localizedDescription)
+        }
         return interval
     }
 
-    func closeInterval(_ interval: ActiveInterval, endDate: Date = .now) {
+    func closeInterval(_ interval: ActiveInterval, endDate: Date = .now) throws {
         interval.endDate = endDate
-        try? modelContext.save()
+        do {
+            try modelContext.save()
+        } catch {
+            throw PersistenceError.saveFailed(underlying: error.localizedDescription)
+        }
     }
 
-    func deleteInterval(_ interval: ActiveInterval) {
+    func deleteInterval(_ interval: ActiveInterval) throws {
         modelContext.delete(interval)
-        try? modelContext.save()
+        do {
+            try modelContext.save()
+        } catch {
+            throw PersistenceError.saveFailed(underlying: error.localizedDescription)
+        }
     }
 
     func fetchOpenInterval() -> ActiveInterval? {

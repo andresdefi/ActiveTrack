@@ -1,12 +1,16 @@
 import Foundation
 import SwiftData
 import AppKit
+import os.log
+
+private let logger = Logger(subsystem: "com.activetrack.app", category: "TimerService")
 
 @Observable
 final class TimerService {
     private(set) var isRunning = false
     private(set) var todayTotal: TimeInterval = 0
     private(set) var currentIntervalElapsed: TimeInterval = 0
+    private(set) var lastError: PersistenceError?
 
     private var timer: Timer?
     private var midnightTimer: Timer?
@@ -32,21 +36,40 @@ final class TimerService {
 
         // Close any orphaned open intervals left by a previous crash or force-quit
         while let orphan = persistence.fetchOpenInterval() {
-            persistence.closeInterval(orphan)
+            do {
+                try persistence.closeInterval(orphan)
+            } catch {
+                logger.error("Failed to close orphaned interval: \(error.localizedDescription)")
+                lastError = error as? PersistenceError
+                return
+            }
         }
 
         refreshTodayTotal()
-        let interval = persistence.createInterval()
-        currentInterval = interval
-        isRunning = true
-        currentIntervalElapsed = 0
-        startTicking()
+
+        do {
+            let interval = try persistence.createInterval()
+            currentInterval = interval
+            isRunning = true
+            currentIntervalElapsed = 0
+            lastError = nil
+            startTicking()
+        } catch {
+            logger.error("Failed to create interval: \(error.localizedDescription)")
+            lastError = error as? PersistenceError
+        }
     }
 
     func pause() {
         guard let persistence = persistenceService, let interval = currentInterval, isRunning else { return }
 
-        persistence.closeInterval(interval)
+        do {
+            try persistence.closeInterval(interval)
+            lastError = nil
+        } catch {
+            logger.error("Failed to close interval: \(error.localizedDescription)")
+            lastError = error as? PersistenceError
+        }
         stopTicking()
         isRunning = false
         currentInterval = nil
@@ -163,11 +186,16 @@ final class TimerService {
 
             let todayStart = Calendar.current.startOfDay(for: .now)
 
-            persistence.closeInterval(interval, endDate: todayStart)
-
-            let newInterval = persistence.createInterval(startDate: todayStart)
-            currentInterval = newInterval
-            currentIntervalElapsed = Date.now.timeIntervalSince(todayStart)
+            do {
+                try persistence.closeInterval(interval, endDate: todayStart)
+                let newInterval = try persistence.createInterval(startDate: todayStart)
+                currentInterval = newInterval
+                currentIntervalElapsed = Date.now.timeIntervalSince(todayStart)
+                lastError = nil
+            } catch {
+                logger.error("Failed during midnight rollover: \(error.localizedDescription)")
+                lastError = error as? PersistenceError
+            }
         }
 
         refreshTodayTotal()
