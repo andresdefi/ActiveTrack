@@ -2,6 +2,7 @@ import SwiftUI
 import Charts
 
 struct MonthlyChartView: View {
+    let timerService: TimerService
     let persistenceService: PersistenceService
     @State private var data: [MonthlyTotal] = []
 
@@ -47,6 +48,7 @@ struct MonthlyChartView: View {
             }
         }
         .onAppear { refreshData() }
+        .onChange(of: timerService.isRunning) { refreshData() }
     }
 
     private func refreshData() {

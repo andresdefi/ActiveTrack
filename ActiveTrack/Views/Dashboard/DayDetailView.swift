@@ -2,18 +2,19 @@ import SwiftUI
 
 struct DayDetailView: View {
     let day: Date
+    let timerService: TimerService
     let persistenceService: PersistenceService
 
-    var body: some View {
-        let intervals = persistenceService.intervalsForDay(day)
-        let total = persistenceService.durationForDay(day)
+    @State private var intervals: [(start: Date, end: Date, duration: TimeInterval)] = []
+    @State private var total: TimeInterval = 0
 
+    var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 VStack(alignment: .leading) {
                     Text(day.shortDateString)
                         .font(.title2.bold())
-                    Text("Total: \(total.formattedHoursMinutes)")
+                    Text("Total: \(displayTotal.formattedHoursMinutes)")
                         .font(.title3)
                         .foregroundStyle(.secondary)
                 }
@@ -46,5 +47,20 @@ struct DayDetailView: View {
             }
         }
         .padding()
+        .onAppear { refreshData() }
+        .onChange(of: day) { refreshData() }
+        .onChange(of: timerService.isRunning) { refreshData() }
+    }
+
+    private var displayTotal: TimeInterval {
+        if timerService.isRunning && Calendar.current.isDateInToday(day) {
+            return total + timerService.currentIntervalElapsed
+        }
+        return total
+    }
+
+    private func refreshData() {
+        intervals = persistenceService.intervalsForDay(day)
+        total = persistenceService.durationForDay(day)
     }
 }

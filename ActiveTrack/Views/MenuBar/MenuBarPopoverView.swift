@@ -2,12 +2,31 @@ import SwiftUI
 import SwiftData
 
 struct MenuBarPopoverView: View {
-    @Bindable var timerService: TimerService
+    let timerService: TimerService
     let persistenceService: PersistenceService
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(spacing: 16) {
+            if let error = timerService.lastError {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.yellow)
+                    Text(errorMessage(error))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                    Spacer()
+                    Button("Retry") {
+                        timerService.toggle()
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                }
+                .padding(8)
+                .background(.red.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+            }
+
             TodaySummaryView(timerService: timerService)
             TimerControlsView(timerService: timerService)
 
@@ -16,7 +35,6 @@ struct MenuBarPopoverView: View {
             HStack {
                 Button("Dashboard") {
                     openWindow(id: "dashboard")
-                    NSApp.setActivationPolicy(.regular)
                     NSApp.activate(ignoringOtherApps: true)
                 }
                 .buttonStyle(.link)
@@ -33,5 +51,12 @@ struct MenuBarPopoverView: View {
         }
         .padding(16)
         .frame(width: 260)
+    }
+
+    private func errorMessage(_ error: PersistenceError) -> String {
+        switch error {
+        case .saveFailed(let underlying):
+            return "Save failed: \(underlying)"
+        }
     }
 }

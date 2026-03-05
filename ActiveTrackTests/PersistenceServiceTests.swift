@@ -73,13 +73,16 @@ final class PersistenceServiceTests: XCTestCase {
     // MARK: - Daily Duration
 
     func testDurationForToday() {
-        let now = Date.now
-        let oneHourAgo = now.addingTimeInterval(-3600)
-        let interval = ActiveInterval(startDate: oneHourAgo, endDate: now)
+        // Use times that are guaranteed to be within today to avoid midnight edge case
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        let start = today.addingTimeInterval(3600)   // 01:00 today
+        let end = today.addingTimeInterval(7200)      // 02:00 today
+        let interval = ActiveInterval(startDate: start, endDate: end)
         context.insert(interval)
         try! context.save()
 
-        let duration = service.durationForDay(now)
+        let duration = service.durationForDay(today)
         XCTAssertEqual(duration, 3600, accuracy: 2)
     }
 

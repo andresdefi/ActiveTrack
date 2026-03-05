@@ -7,6 +7,7 @@ enum ChartPeriod: String, CaseIterable {
 }
 
 struct ChartContainerView: View {
+    let timerService: TimerService
     let persistenceService: PersistenceService
     @State private var selectedPeriod: ChartPeriod = .daily
 
@@ -22,11 +23,11 @@ struct ChartContainerView: View {
 
             switch selectedPeriod {
             case .daily:
-                DailyChartView(persistenceService: persistenceService)
+                DailyChartView(timerService: timerService, persistenceService: persistenceService)
             case .weekly:
-                WeeklyChartView(persistenceService: persistenceService)
+                WeeklyChartView(timerService: timerService, persistenceService: persistenceService)
             case .monthly:
-                MonthlyChartView(persistenceService: persistenceService)
+                MonthlyChartView(timerService: timerService, persistenceService: persistenceService)
             }
         }
         .padding()

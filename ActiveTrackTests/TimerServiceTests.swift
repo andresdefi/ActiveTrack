@@ -2,6 +2,7 @@ import XCTest
 import SwiftData
 @testable import ActiveTrack
 
+@MainActor
 final class TimerServiceTests: XCTestCase {
     private var container: ModelContainer!
     private var context: ModelContext!
@@ -12,7 +13,7 @@ final class TimerServiceTests: XCTestCase {
         super.setUp()
         let config = ModelConfiguration(isStoredInMemoryOnly: true)
         container = try! ModelContainer(for: ActiveInterval.self, configurations: config)
-        context = ModelContext(container)
+        context = container.mainContext
         persistence = PersistenceService(modelContext: context)
         timer = TimerService()
         timer.configure(persistenceService: persistence)
@@ -70,8 +71,7 @@ final class TimerServiceTests: XCTestCase {
         context.insert(interval)
         try! context.save()
 
-        let newTimer = TimerService()
-        newTimer.configure(persistenceService: persistence)
+        let newTimer = TimerService(); newTimer.configure(persistenceService: persistence)
         XCTAssertTrue(newTimer.isRunning)
         XCTAssertGreaterThan(newTimer.currentIntervalElapsed, 50)
     }
@@ -126,8 +126,7 @@ final class TimerServiceTests: XCTestCase {
         try! context.save()
 
         // Recovery triggers immediate rollover for previous-day intervals
-        let newTimer = TimerService()
-        newTimer.configure(persistenceService: persistence)
+        let newTimer = TimerService(); newTimer.configure(persistenceService: persistence)
 
         // Should still be running with a new interval for today
         XCTAssertTrue(newTimer.isRunning)
@@ -151,8 +150,7 @@ final class TimerServiceTests: XCTestCase {
         context.insert(interval)
         try! context.save()
 
-        let newTimer = TimerService()
-        newTimer.configure(persistenceService: persistence)
+        let newTimer = TimerService(); newTimer.configure(persistenceService: persistence)
 
         // The old interval should be closed with endDate at start of today (midnight)
         let todayStart = calendar.startOfDay(for: .now)
@@ -171,8 +169,7 @@ final class TimerServiceTests: XCTestCase {
         context.insert(interval)
         try! context.save()
 
-        let newTimer = TimerService()
-        newTimer.configure(persistenceService: persistence)
+        let t = TimerService(); t.configure(persistenceService: persistence)
 
         // Yesterday should have 2 hours (22:00 -> 00:00)
         let yesterdayDuration = persistence.durationForDay(yesterdayStart)
@@ -188,8 +185,7 @@ final class TimerServiceTests: XCTestCase {
         context.insert(interval)
         try! context.save()
 
-        let newTimer = TimerService()
-        newTimer.configure(persistenceService: persistence)
+        let newTimer = TimerService(); newTimer.configure(persistenceService: persistence)
 
         // todayTotal should be 0 (no completed intervals for today yet)
         XCTAssertEqual(newTimer.todayTotal, 0, accuracy: 1)
@@ -221,8 +217,7 @@ final class TimerServiceTests: XCTestCase {
         context.insert(interval)
         try! context.save()
 
-        let newTimer = TimerService()
-        newTimer.configure(persistenceService: persistence)
+        let newTimer = TimerService(); newTimer.configure(persistenceService: persistence)
 
         // Should recover and roll over even with a multi-day gap
         XCTAssertTrue(newTimer.isRunning)
@@ -232,9 +227,42 @@ final class TimerServiceTests: XCTestCase {
 
         // The old interval should be closed
         let all = persistence.fetchAllIntervals()
-        let closed = all.first { $0.endDate != nil }
-        XCTAssertNotNil(closed)
-        XCTAssertEqual(closed!.startDate, start)
+        let closed = all.filter { $0.endDate != nil }
+        XCTAssertGreaterThan(closed.count, 0)
+
+        // The original interval should be closed at its next midnight
+        let originalClosed = closed.first { $0.startDate == start }
+        XCTAssertNotNil(originalClosed)
+    }
+
+    func testMultiDayGapCreatesIntermediateDayIntervals() {
+        let calendar = Calendar.current
+        let threeDaysAgo = calendar.date(byAdding: .day, value: -3, to: calendar.startOfDay(for: .now))!
+        let start = calendar.date(byAdding: .hour, value: 15, to: threeDaysAgo)!
+
+        let interval = ActiveInterval(startDate: start)
+        context.insert(interval)
+        try! context.save()
+
+        let t = TimerService(); t.configure(persistenceService: persistence)
+
+        // Each intermediate day should have data
+        let twoDaysAgo = calendar.date(byAdding: .day, value: -2, to: calendar.startOfDay(for: .now))!
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: .now))!
+
+        let twoDaysAgoDuration = persistence.durationForDay(twoDaysAgo)
+        let yesterdayDuration = persistence.durationForDay(yesterday)
+
+        // Each intermediate day should have a full 24h interval
+        XCTAssertEqual(twoDaysAgoDuration, 86400, accuracy: 5,
+                       "Two days ago should have a full day of tracked time from the gap")
+        XCTAssertEqual(yesterdayDuration, 86400, accuracy: 5,
+                       "Yesterday should have a full day of tracked time from the gap")
+
+        // Three days ago should have 9h (15:00 -> midnight)
+        let threeDaysAgoDuration = persistence.durationForDay(threeDaysAgo)
+        XCTAssertEqual(threeDaysAgoDuration, 32400, accuracy: 5,
+                       "Three days ago should have 9h (15:00 -> midnight)")
     }
 
     // MARK: - Midnight Rollover Guard (the bug fix)
@@ -320,8 +348,7 @@ final class TimerServiceTests: XCTestCase {
         context.insert(interval)
         try! context.save()
 
-        let newTimer = TimerService()
-        newTimer.configure(persistenceService: persistence)
+        let newTimer = TimerService(); newTimer.configure(persistenceService: persistence)
 
         // The old interval should be closed at midnight
         let all = persistence.fetchAllIntervals()
@@ -540,27 +567,37 @@ final class TimerServiceTests: XCTestCase {
 
     func testRecoveryOfTodayIntervalDoesNotRollover() {
         // Simulate: app quit without pausing, relaunched same day
-        let oneHourAgo = Date.now.addingTimeInterval(-3600)
-        let interval = ActiveInterval(startDate: oneHourAgo)
+        // Use a time guaranteed to be within today (not crossing midnight)
+        let calendar = Calendar.current
+        let todayStart = calendar.startOfDay(for: .now)
+        let elapsed: TimeInterval = min(Date.now.timeIntervalSince(todayStart) / 2, 1800)
+        // If we're very early in the day, use a small offset; otherwise ~30min
+        let startTime = Date.now.addingTimeInterval(-max(elapsed, 60))
+
+        guard calendar.isDateInToday(startTime) else {
+            // If even a small offset crosses midnight, skip — test isn't meaningful
+            return
+        }
+
+        let interval = ActiveInterval(startDate: startTime)
         context.insert(interval)
         try! context.save()
 
-        let newTimer = TimerService()
-        newTimer.configure(persistenceService: persistence)
+        let newTimer = TimerService(); newTimer.configure(persistenceService: persistence)
 
         // Should recover without rollover
         XCTAssertTrue(newTimer.isRunning)
 
         let open = persistence.fetchOpenInterval()
         XCTAssertNotNil(open)
-        XCTAssertEqual(open!.startDate, oneHourAgo,
+        XCTAssertEqual(open!.startDate, startTime,
                        "Today's interval should not be modified by recovery")
 
-        // Elapsed should be ~1 hour, not time since midnight
-        XCTAssertEqual(newTimer.currentIntervalElapsed, 3600, accuracy: 10)
+        // Elapsed should be approximately the time since startTime
+        let expectedElapsed = Date.now.timeIntervalSince(startTime)
+        XCTAssertEqual(newTimer.currentIntervalElapsed, expectedElapsed, accuracy: 10)
 
-        // displayTime should be ~1 hour
-        let todayStart = Calendar.current.startOfDay(for: .now)
+        // displayTime should be less than wall-clock time since midnight
         let timeSinceMidnight = Date.now.timeIntervalSince(todayStart)
         XCTAssertLessThan(newTimer.displayTime, timeSinceMidnight,
                           "displayTime should be less than wall-clock time (not showing time since midnight)")
@@ -573,8 +610,7 @@ final class TimerServiceTests: XCTestCase {
         context.insert(interval)
         try! context.save()
 
-        let newTimer = TimerService()
-        newTimer.configure(persistenceService: persistence)
+        let newTimer = TimerService(); newTimer.configure(persistenceService: persistence)
 
         XCTAssertFalse(newTimer.isRunning, "Should not be running when all intervals are closed")
         XCTAssertEqual(newTimer.currentIntervalElapsed, 0)
@@ -620,6 +656,23 @@ final class TimerServiceTests: XCTestCase {
                         "Orphaned open interval should be closed when a new timer starts")
     }
 
+    func testOrphanCloseIterationCap() {
+        // This tests that the orphan-close loop won't run forever.
+        // With a working persistence layer, the loop should always terminate normally.
+        // The cap is a safety net — we just verify start() works with multiple orphans.
+        for _ in 0..<5 {
+            let orphan = ActiveInterval(startDate: Date.now.addingTimeInterval(-Double.random(in: 3600...86400)))
+            context.insert(orphan)
+        }
+        try! context.save()
+
+        timer.start()
+
+        let all = persistence.fetchAllIntervals()
+        let openCount = all.filter { $0.endDate == nil }.count
+        XCTAssertEqual(openCount, 1, "Should have exactly 1 open interval after cleaning orphans")
+    }
+
     func testRecoveryWithMultipleOpenIntervalsPicksMostRecent() {
         // Multiple orphaned open intervals — recovery should use the most recent
         let calendar = Calendar.current
@@ -632,8 +685,7 @@ final class TimerServiceTests: XCTestCase {
         context.insert(recentInterval)
         try! context.save()
 
-        let newTimer = TimerService()
-        newTimer.configure(persistenceService: persistence)
+        let newTimer = TimerService(); newTimer.configure(persistenceService: persistence)
 
         // Should be running with the most recent interval's elapsed time (~10 min, not ~24h)
         XCTAssertTrue(newTimer.isRunning)
@@ -662,8 +714,7 @@ final class TimerServiceTests: XCTestCase {
         context.insert(i3)
         try! context.save()
 
-        let newTimer = TimerService()
-        newTimer.configure(persistenceService: persistence)
+        let newTimer = TimerService(); newTimer.configure(persistenceService: persistence)
 
         // todayTotal should include the 2 completed intervals (2h = 7200s)
         XCTAssertEqual(newTimer.todayTotal, 7200, accuracy: 5)

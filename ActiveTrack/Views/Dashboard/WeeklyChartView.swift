@@ -2,6 +2,7 @@ import SwiftUI
 import Charts
 
 struct WeeklyChartView: View {
+    let timerService: TimerService
     let persistenceService: PersistenceService
     @State private var data: [WeeklyTotal] = []
 
@@ -47,6 +48,7 @@ struct WeeklyChartView: View {
             }
         }
         .onAppear { refreshData() }
+        .onChange(of: timerService.isRunning) { refreshData() }
     }
 
     private func refreshData() {

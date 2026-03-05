@@ -32,22 +32,26 @@ extension Date {
         Calendar.current.startOfDay(for: self)
     }
 
-    var endOfDay: Date {
-        Calendar.current.date(byAdding: DateComponents(day: 1, second: -1), to: startOfDay)!
-    }
-
-    var shortDateString: String {
+    private static let shortDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .none
-        return formatter.string(from: self)
-    }
+        return formatter
+    }()
 
-    var timeString: String {
+    private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .none
         formatter.timeStyle = .short
-        return formatter.string(from: self)
+        return formatter
+    }()
+
+    var shortDateString: String {
+        Self.shortDateFormatter.string(from: self)
+    }
+
+    var timeString: String {
+        Self.timeFormatter.string(from: self)
     }
 
     var weekOfYear: Int {
@@ -55,9 +59,7 @@ extension Date {
     }
 
     var monthYearString: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MMM yyyy"
-        return formatter.string(from: self)
+        self.formatted(.dateTime.month(.abbreviated).year())
     }
 
     var weekRangeString: String {
@@ -66,8 +68,8 @@ extension Date {
               let weekEnd = calendar.date(byAdding: .day, value: 6, to: weekStart) else {
             return ""
         }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MMM d"
-        return "\(formatter.string(from: weekStart))–\(formatter.string(from: weekEnd))"
+        let startFormatted = weekStart.formatted(.dateTime.month(.abbreviated).day())
+        let endFormatted = weekEnd.formatted(.dateTime.month(.abbreviated).day())
+        return "\(startFormatted)–\(endFormatted)"
     }
 }

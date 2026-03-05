@@ -5,8 +5,11 @@ import os.log
 
 private let logger = Logger(subsystem: "com.activetrack.app", category: "TimerService")
 
+@MainActor
 @Observable
 final class TimerService {
+    private let persistenceEnabled = true
+    private let dashboardSafeMode = false
     private(set) var isRunning = false
     private(set) var todayTotal: TimeInterval = 0
     private(set) var currentIntervalElapsed: TimeInterval = 0
@@ -14,7 +17,9 @@ final class TimerService {
 
     private var timer: Timer?
     private var midnightTimer: Timer?
-    private var currentInterval: ActiveInterval?
+    /// Cached start date of the current interval. Keep timer math on value
+    /// types to avoid touching SwiftData model getters on tick callbacks.
+    private var currentIntervalStartDate: Date?
     private var persistenceService: PersistenceService?
     private var sleepObserver: Any?
     private var wakeObserver: Any?
@@ -23,59 +28,98 @@ final class TimerService {
         todayTotal + currentIntervalElapsed
     }
 
+    var isPersistenceEnabled: Bool {
+        persistenceEnabled
+    }
+
+    var isDashboardSafeMode: Bool {
+        dashboardSafeMode
+    }
+
+    init() {}
+
+    convenience init(persistenceService: PersistenceService) {
+        self.init()
+        configure(persistenceService: persistenceService)
+    }
+
     func configure(persistenceService: PersistenceService) {
         self.persistenceService = persistenceService
         observeSleep()
-        recoverOpenInterval()
-        refreshTodayTotal()
+        if persistenceEnabled {
+            recoverOpenInterval()
+            refreshTodayTotal()
+        }
         scheduleMidnightRollover()
     }
 
-    func start() {
-        guard let persistence = persistenceService, !isRunning else { return }
-
-        // Close any orphaned open intervals left by a previous crash or force-quit
-        while let orphan = persistence.fetchOpenInterval() {
-            do {
-                try persistence.closeInterval(orphan)
-            } catch {
-                logger.error("Failed to close orphaned interval: \(error.localizedDescription)")
-                lastError = error as? PersistenceError
-                return
+    deinit {
+        MainActor.assumeIsolated {
+            timer?.invalidate()
+            midnightTimer?.invalidate()
+            if let sleepObserver {
+                NSWorkspace.shared.notificationCenter.removeObserver(sleepObserver)
             }
-        }
-
-        refreshTodayTotal()
-
-        do {
-            let interval = try persistence.createInterval()
-            currentInterval = interval
-            isRunning = true
-            currentIntervalElapsed = 0
-            lastError = nil
-            startTicking()
-        } catch {
-            logger.error("Failed to create interval: \(error.localizedDescription)")
-            lastError = error as? PersistenceError
+            if let wakeObserver {
+                NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+            }
         }
     }
 
-    func pause() {
-        guard let persistence = persistenceService, let interval = currentInterval, isRunning else { return }
+    func start() {
+        guard !isRunning else { return }
 
-        do {
-            try persistence.closeInterval(interval)
-            lastError = nil
-            stopTicking()
-            isRunning = false
-            currentInterval = nil
-            currentIntervalElapsed = 0
-            refreshTodayTotal()
-        } catch {
-            logger.error("Failed to close interval: \(error.localizedDescription)")
-            lastError = error as? PersistenceError
-            // Keep timer running so user knows data isn't saved yet
+        if persistenceEnabled, let persistenceService {
+            do {
+                let startDate = Date.now
+                _ = try persistenceService.createInterval(startDate: startDate)
+                currentIntervalStartDate = startDate
+                isRunning = true
+                currentIntervalElapsed = 0
+                lastError = nil
+                startTicking()
+            } catch {
+                logger.error("Failed to create interval: \(error.localizedDescription)")
+                lastError = error as? PersistenceError
+            }
+            return
         }
+
+        currentIntervalStartDate = .now
+        isRunning = true
+        currentIntervalElapsed = 0
+        lastError = nil
+        startTicking()
+    }
+
+    func pause() {
+        guard isRunning else { return }
+
+        if persistenceEnabled, let persistenceService {
+            do {
+                if let interval = persistenceService.fetchOpenInterval() {
+                    try persistenceService.closeInterval(interval)
+                }
+                lastError = nil
+                stopTicking()
+                isRunning = false
+                currentIntervalStartDate = nil
+                currentIntervalElapsed = 0
+                refreshTodayTotal()
+            } catch {
+                logger.error("Failed to close interval: \(error.localizedDescription)")
+                lastError = error as? PersistenceError
+                // Keep timer running so user knows data isn't saved yet
+            }
+            return
+        }
+
+        stopTicking()
+        isRunning = false
+        todayTotal += currentIntervalElapsed
+        currentIntervalStartDate = nil
+        currentIntervalElapsed = 0
+        lastError = nil
     }
 
     func toggle() {
@@ -87,8 +131,8 @@ final class TimerService {
     }
 
     func refreshTodayTotal() {
-        guard let persistence = persistenceService else { return }
-        todayTotal = persistence.durationForDay(.now, completedOnly: true)
+        guard persistenceEnabled, let persistenceService else { return }
+        todayTotal = persistenceService.durationForDay(.now, completedOnly: true)
     }
 
     // MARK: - Private
@@ -99,14 +143,18 @@ final class TimerService {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.handleSleep()
+            Task { @MainActor [weak self] in
+                self?.handleSleep()
+            }
         }
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.handleWake()
+            Task { @MainActor [weak self] in
+                self?.handleWake()
+            }
         }
     }
 
@@ -117,35 +165,33 @@ final class TimerService {
 
     // Internal for @testable access in tests
     func handleWake() {
-        // Reschedule the midnight timer in case its fire date passed during sleep.
-        // The guard in handleMidnightRollover protects against stale fires,
-        // but rescheduling here avoids the stale fire altogether.
         scheduleMidnightRollover()
         refreshTodayTotal()
     }
 
     private func recoverOpenInterval() {
-        guard let persistence = persistenceService else { return }
-
-        if let openInterval = persistence.fetchOpenInterval() {
-            currentInterval = openInterval
-            isRunning = true
-            currentIntervalElapsed = Date.now.timeIntervalSince(openInterval.startDate)
-
-            if !Calendar.current.isDateInToday(openInterval.startDate) {
-                handleMidnightRollover()
+        guard let persistenceService else { return }
+        // Never auto-resume unknown open intervals. Closing any orphan avoids
+        // stale "running" rows from older crashes while preserving history.
+        if let openInterval = persistenceService.fetchOpenInterval() {
+            do {
+                try persistenceService.closeInterval(openInterval)
+            } catch {
+                logger.error("Failed to close recovered open interval: \(error.localizedDescription)")
+                lastError = error as? PersistenceError
             }
-
-            startTicking()
         }
     }
 
     private func startTicking() {
         stopTicking()
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.tick()
+        let scheduled = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.tick()
+            }
         }
-        RunLoop.current.add(timer!, forMode: .common)
+        RunLoop.current.add(scheduled, forMode: .common)
+        timer = scheduled
     }
 
     private func stopTicking() {
@@ -154,10 +200,10 @@ final class TimerService {
     }
 
     private func tick() {
-        guard let interval = currentInterval else { return }
-        currentIntervalElapsed = Date.now.timeIntervalSince(interval.startDate)
+        guard let startDate = currentIntervalStartDate else { return }
+        currentIntervalElapsed = Date.now.timeIntervalSince(startDate)
 
-        if !Calendar.current.isDateInToday(interval.startDate) {
+        if !Calendar.current.isDateInToday(startDate) {
             handleMidnightRollover()
         }
     }
@@ -167,30 +213,69 @@ final class TimerService {
         let calendar = Calendar.current
         guard let tomorrow = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: .now)) else { return }
         let delay = tomorrow.timeIntervalSince(.now)
-        midnightTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
-            self?.handleMidnightRollover()
+        let scheduled = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.handleMidnightRollover()
+            }
         }
-        RunLoop.current.add(midnightTimer!, forMode: .common)
+        RunLoop.current.add(scheduled, forMode: .common)
+        midnightTimer = scheduled
     }
 
     // Internal for @testable access in tests
     func handleMidnightRollover() {
-        if isRunning, let persistence = persistenceService, let interval = currentInterval {
+        if !persistenceEnabled {
+            let calendar = Calendar.current
+            if isRunning, let startDate = currentIntervalStartDate, !calendar.isDateInToday(startDate) {
+                let todayStart = calendar.startOfDay(for: .now)
+                todayTotal = 0
+                currentIntervalStartDate = todayStart
+                currentIntervalElapsed = Date.now.timeIntervalSince(todayStart)
+            } else if !isRunning {
+                todayTotal = 0
+            }
+
+            scheduleMidnightRollover()
+            return
+        }
+
+        if isRunning, let persistenceService, let startDate = currentIntervalStartDate {
             // Only split the interval if it actually started before today.
-            // This guards against the timer firing late (e.g. after system wake)
-            // when the current interval is entirely within today.
-            guard !Calendar.current.isDateInToday(interval.startDate) else {
+            guard !Calendar.current.isDateInToday(startDate) else {
                 refreshTodayTotal()
                 scheduleMidnightRollover()
                 return
             }
 
-            let todayStart = Calendar.current.startOfDay(for: .now)
+            let calendar = Calendar.current
+            let todayStart = calendar.startOfDay(for: .now)
 
             do {
-                try persistence.closeInterval(interval, endDate: todayStart)
-                let newInterval = try persistence.createInterval(startDate: todayStart)
-                currentInterval = newInterval
+                // Multi-day gap: create one closed interval per day boundary
+                var currentStart = startDate
+                var nextMidnight = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 1, to: currentStart)!)
+
+                // Close the original interval at the first midnight boundary.
+                if let openInterval = persistenceService.fetchOpenInterval() {
+                    try persistenceService.closeInterval(openInterval, endDate: nextMidnight)
+                }
+                currentStart = nextMidnight
+
+                // Create intermediate day intervals for any days between start and today
+                while currentStart < todayStart {
+                    nextMidnight = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 1, to: currentStart)!)
+                    let endOfDay = min(nextMidnight, todayStart)
+                    try persistenceService.createInterval(startDate: currentStart)
+                    if let intermediateInterval = persistenceService.fetchOpenInterval() {
+                        try persistenceService.closeInterval(intermediateInterval, endDate: endOfDay)
+                    }
+                    currentStart = endOfDay
+                }
+
+                // Create new open interval for today
+                let newInterval = try persistenceService.createInterval(startDate: todayStart)
+                _ = newInterval
+                currentIntervalStartDate = todayStart
                 currentIntervalElapsed = Date.now.timeIntervalSince(todayStart)
                 lastError = nil
             } catch {

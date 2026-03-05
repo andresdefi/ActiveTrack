@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct TimerControlsView: View {
-    @Bindable var timerService: TimerService
+    let timerService: TimerService
 
     var body: some View {
         Button(action: { timerService.toggle() }) {
