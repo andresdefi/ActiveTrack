@@ -1,5 +1,6 @@
 import XCTest
 import SwiftData
+import AppKit
 @testable import ActiveTrack
 
 @MainActor
@@ -721,5 +722,56 @@ final class TimerServiceTests: XCTestCase {
 
         // displayTime should be todayTotal + current elapsed (~30 min)
         XCTAssertEqual(newTimer.displayTime, 7200 + 1800, accuracy: 10)
+    }
+
+    // MARK: - v1.2.1 Regressions
+
+    func testStartPausePersistenceRoundtripWithSQLiteStore() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ActiveTrackTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let storeURL = directory.appendingPathComponent("roundtrip.store")
+        let config = ModelConfiguration(url: storeURL, allowsSave: true)
+        let container = try ModelContainer(for: ActiveInterval.self, configurations: config)
+        let persistence = PersistenceService(modelContext: container.mainContext, storeURL: storeURL)
+
+        let t1 = TimerService()
+        t1.configure(persistenceService: persistence)
+        t1.start()
+
+        let exp = expectation(description: "collect some elapsed time")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { exp.fulfill() }
+        wait(for: [exp], timeout: 2)
+        t1.pause()
+
+        let persistedBefore = t1.todayTotal
+        XCTAssertGreaterThan(persistedBefore, 0)
+
+        let t2 = TimerService()
+        t2.configure(persistenceService: persistence)
+        XCTAssertEqual(t2.todayTotal, persistedBefore, accuracy: 2)
+    }
+
+    func testAppDelegateDoesNotTerminateAfterLastWindowClosed() {
+        let delegate = ActiveTrackAppDelegate()
+        XCTAssertFalse(delegate.applicationShouldTerminateAfterLastWindowClosed(NSApplication.shared))
+    }
+
+    func testSleepWakeKeepsTimerPausedAndPreservesTotal() {
+        timer.start()
+        let exp = expectation(description: "collect time")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { exp.fulfill() }
+        wait(for: [exp], timeout: 2)
+
+        timer.handleSleep()
+        let pausedTotal = timer.todayTotal
+
+        timer.handleWake()
+
+        XCTAssertFalse(timer.isRunning)
+        XCTAssertEqual(timer.todayTotal, pausedTotal, accuracy: 2)
+        XCTAssertNil(persistence.fetchOpenInterval())
     }
 }

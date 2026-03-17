@@ -55,7 +55,7 @@ final class StatusBarController {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         popover = NSPopover()
-        popover.contentSize = NSSize(width: 260, height: 200)
+        popover.contentSize = NSSize(width: 280, height: 240)
         popover.behavior = .transient
         popover.contentViewController = NSHostingController(
             rootView: MenuBarPopoverView(timerService: timerService, persistenceService: persistenceService)
@@ -117,6 +117,10 @@ final class StatusBarController {
         if popover.isShown {
             popover.performClose(sender)
         } else if let button = statusItem.button {
+            if let contentView = popover.contentViewController?.view {
+                let fittingSize = contentView.fittingSize
+                popover.contentSize = NSSize(width: 280, height: min(max(fittingSize.height, 180), 420))
+            }
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             // Ensure the popover's window becomes key so clicks work
             popover.contentViewController?.view.window?.makeKey()
@@ -147,6 +151,7 @@ struct ActiveTrackApp: App {
 
     init() {
         let storeURL = Self.storeURL()
+        HealthLog.event("app_launch", metadata: ["store_path": storeURL.path])
         let container: ModelContainer
         do {
             let config = ModelConfiguration(url: storeURL, allowsSave: true)
@@ -157,6 +162,7 @@ struct ActiveTrackApp: App {
             )
         } catch {
             logger_app.error("Failed to open persistent store at \(storeURL.path, privacy: .public): \(error.localizedDescription). Rebuilding local store.")
+            HealthLog.event("store_open_failed", metadata: ["error": error.localizedDescription])
             Self.quarantineStoreFiles(at: storeURL)
             do {
                 let freshConfig = ModelConfiguration(url: storeURL, allowsSave: true)
@@ -167,6 +173,7 @@ struct ActiveTrackApp: App {
                 )
             } catch {
                 logger_app.error("Failed to rebuild persistent store: \(error.localizedDescription). Falling back to in-memory store.")
+                HealthLog.event("store_rebuild_failed", metadata: ["error": error.localizedDescription])
                 let memoryConfig = ModelConfiguration(isStoredInMemoryOnly: true)
                 do {
                     container = try ModelContainer(
@@ -181,6 +188,9 @@ struct ActiveTrackApp: App {
         }
 
         let persistence = PersistenceService(modelContext: container.mainContext, storeURL: storeURL)
+        if let startupWarning = persistence.startupWarning {
+            HealthLog.event("startup_warning", metadata: ["message": startupWarning])
+        }
         let timer = TimerService(persistenceService: persistence)
 
         self._timerService = State(initialValue: timer)

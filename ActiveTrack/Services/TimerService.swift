@@ -3,6 +3,44 @@ import SwiftData
 import AppKit
 import os.log
 
+enum HealthLog {
+    private static let queue = DispatchQueue(label: "com.activetrack.healthlog")
+
+    static func event(_ name: String, metadata: [String: String] = [:]) {
+        queue.async {
+            let timestamp = ISO8601DateFormatter().string(from: .now)
+            let details = metadata
+                .sorted(by: { $0.key < $1.key })
+                .map { "\($0.key)=\($0.value)" }
+                .joined(separator: " ")
+            let line = details.isEmpty ? "\(timestamp) \(name)\n" : "\(timestamp) \(name) \(details)\n"
+
+            let url = logFileURL()
+            if !FileManager.default.fileExists(atPath: url.path) {
+                FileManager.default.createFile(atPath: url.path, contents: nil)
+            }
+            guard let data = line.data(using: .utf8),
+                  let handle = try? FileHandle(forWritingTo: url) else { return }
+            defer { try? handle.close() }
+            do {
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+            } catch {
+                // Best-effort diagnostics only.
+            }
+        }
+    }
+
+    private static func logFileURL() -> URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let directory = appSupport.appendingPathComponent("ActiveTrack", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: directory.path) {
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        return directory.appendingPathComponent("health.log")
+    }
+}
+
 private let logger = Logger(subsystem: "com.activetrack.app", category: "TimerService")
 
 @MainActor
@@ -71,6 +109,7 @@ final class TimerService {
 
         if persistenceEnabled, let persistenceService {
             do {
+                try closeStaleOpenIntervals(keepingMostRecent: false)
                 let startDate = Date.now
                 _ = try persistenceService.createInterval(startDate: startDate)
                 currentIntervalStartDate = startDate
@@ -78,9 +117,11 @@ final class TimerService {
                 currentIntervalElapsed = 0
                 lastError = nil
                 startTicking()
+                HealthLog.event("timer_start")
             } catch {
                 logger.error("Failed to create interval: \(error.localizedDescription)")
                 lastError = error as? PersistenceError
+                HealthLog.event("timer_start_failed", metadata: ["error": error.localizedDescription])
             }
             return
         }
@@ -90,6 +131,7 @@ final class TimerService {
         currentIntervalElapsed = 0
         lastError = nil
         startTicking()
+        HealthLog.event("timer_start_in_memory")
     }
 
     func pause() {
@@ -106,10 +148,12 @@ final class TimerService {
                 currentIntervalStartDate = nil
                 currentIntervalElapsed = 0
                 refreshTodayTotal()
+                HealthLog.event("timer_pause")
             } catch {
                 logger.error("Failed to close interval: \(error.localizedDescription)")
                 lastError = error as? PersistenceError
                 // Keep timer running so user knows data isn't saved yet
+                HealthLog.event("timer_pause_failed", metadata: ["error": error.localizedDescription])
             }
             return
         }
@@ -120,6 +164,7 @@ final class TimerService {
         currentIntervalStartDate = nil
         currentIntervalElapsed = 0
         lastError = nil
+        HealthLog.event("timer_pause_in_memory")
     }
 
     func toggle() {
@@ -160,26 +205,66 @@ final class TimerService {
 
     // Internal for @testable access in tests
     func handleSleep() {
+        HealthLog.event("system_sleep")
         pause()
     }
 
     // Internal for @testable access in tests
     func handleWake() {
+        HealthLog.event("system_wake")
         scheduleMidnightRollover()
         refreshTodayTotal()
     }
 
+    func resetToday() {
+        if isRunning {
+            pause()
+        }
+
+        guard persistenceEnabled, let persistenceService else {
+            todayTotal = 0
+            currentIntervalElapsed = 0
+            currentIntervalStartDate = nil
+            HealthLog.event("reset_today_in_memory")
+            return
+        }
+
+        do {
+            try persistenceService.resetToday()
+            todayTotal = 0
+            currentIntervalElapsed = 0
+            currentIntervalStartDate = nil
+            lastError = nil
+            HealthLog.event("reset_today")
+        } catch {
+            logger.error("Failed to reset today: \(error.localizedDescription)")
+            lastError = error as? PersistenceError
+            HealthLog.event("reset_today_failed", metadata: ["error": error.localizedDescription])
+        }
+    }
+
     private func recoverOpenInterval() {
-        guard let persistenceService else { return }
-        // Never auto-resume unknown open intervals. Closing any orphan avoids
-        // stale "running" rows from older crashes while preserving history.
-        if let openInterval = persistenceService.fetchOpenInterval() {
-            do {
-                try persistenceService.closeInterval(openInterval)
-            } catch {
-                logger.error("Failed to close recovered open interval: \(error.localizedDescription)")
-                lastError = error as? PersistenceError
+        guard persistenceService != nil else { return }
+        do {
+            let recoveredInterval = try closeStaleOpenIntervals(keepingMostRecent: true)
+            guard let recoveredInterval else { return }
+
+            isRunning = true
+            currentIntervalStartDate = recoveredInterval.startDate
+            currentIntervalElapsed = Date.now.timeIntervalSince(recoveredInterval.startDate)
+            lastError = nil
+
+            if Calendar.current.isDateInToday(recoveredInterval.startDate) {
+                startTicking()
+                HealthLog.event("recovered_open_interval")
+            } else {
+                handleMidnightRollover()
+                HealthLog.event("recovered_open_interval_rollover")
             }
+        } catch {
+            logger.error("Failed to recover open interval: \(error.localizedDescription)")
+            lastError = error as? PersistenceError
+            HealthLog.event("recover_open_interval_failed", metadata: ["error": error.localizedDescription])
         }
     }
 
@@ -286,5 +371,23 @@ final class TimerService {
 
         refreshTodayTotal()
         scheduleMidnightRollover()
+    }
+
+    @discardableResult
+    private func closeStaleOpenIntervals(keepingMostRecent: Bool) throws -> ActiveInterval? {
+        guard let persistenceService else { return nil }
+
+        let openIntervals = persistenceService.fetchAllIntervals()
+            .filter { $0.endDate == nil }
+            .sorted { $0.startDate > $1.startDate }
+
+        guard let mostRecent = openIntervals.first else { return nil }
+
+        let intervalsToClose = keepingMostRecent ? Array(openIntervals.dropFirst()) : openIntervals
+        for interval in intervalsToClose {
+            try persistenceService.closeInterval(interval, endDate: interval.startDate)
+        }
+
+        return keepingMostRecent ? mostRecent : nil
     }
 }

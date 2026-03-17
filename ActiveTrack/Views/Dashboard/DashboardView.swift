@@ -1,11 +1,28 @@
 import SwiftUI
 import SwiftData
 
+private enum DashboardSelection: Hashable {
+    case overview
+    case day(Date)
+}
+
+private struct DashboardMonthSection: Identifiable {
+    let monthStart: Date
+    let title: String
+    let average: TimeInterval
+    let days: [Date]
+
+    var id: Date { monthStart }
+}
+
 struct DashboardView: View {
     let timerService: TimerService
     let persistenceService: PersistenceService
-    @State private var selectedDay: Date?
-    @State private var days: [Date] = []
+    @State private var selectedItem: DashboardSelection = .overview
+    @State private var monthSections: [DashboardMonthSection] = []
+    @State private var expandedMonths: Set<Date> = []
+    @State private var dayDurations: [Date: TimeInterval] = [:]
+    @State private var splitVisibility: NavigationSplitViewVisibility = .all
 
     var body: some View {
         if timerService.isDashboardSafeMode {
@@ -24,13 +41,15 @@ struct DashboardView: View {
             .padding(24)
             .navigationTitle("ActiveTrack")
         } else {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $splitVisibility) {
             sidebar
+                .navigationSplitViewColumnWidth(min: 240, ideal: 270, max: 320)
         } detail: {
-            if let day = selectedDay {
-                DayDetailView(day: day, timerService: timerService, persistenceService: persistenceService)
-            } else {
+            switch selectedItem {
+            case .overview:
                 ChartContainerView(timerService: timerService, persistenceService: persistenceService)
+            case .day(let day):
+                DayDetailView(day: day, timerService: timerService, persistenceService: persistenceService)
             }
         }
         .navigationTitle("ActiveTrack")
@@ -40,52 +59,180 @@ struct DashboardView: View {
         .onChange(of: timerService.isRunning) {
             refreshDays()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .activeTrackShowDashboardOverview)) { _ in
+            showOverview()
+        }
         }
     }
 
     private var sidebar: some View {
-        List(selection: $selectedDay) {
-            if days.isEmpty {
-                ContentUnavailableView {
-                    Label("No Data Yet", systemImage: "clock")
-                } description: {
-                    Text("Start the timer from the menu bar to begin tracking.")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                sidebarButton(
+                    title: "Overview",
+                    subtitle: "Charts and averages",
+                    trailing: nil,
+                    isSelected: selectedItem == .overview
+                ) {
+                    showOverview()
                 }
-            } else {
-                ForEach(days, id: \.self) { day in
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text(day.shortDateString)
-                                .font(.headline)
-                            if Calendar.current.isDateInToday(day) {
-                                Text("Today")
-                                    .font(.caption)
+
+                if monthSections.isEmpty {
+                    ContentUnavailableView {
+                        Label("No Data Yet", systemImage: "clock")
+                    } description: {
+                        Text("Start the timer from the menu bar to begin tracking.")
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 160)
+                } else {
+                    ForEach(monthSections) { section in
+                        DisclosureGroup(
+                            isExpanded: Binding(
+                                get: { expandedMonths.contains(section.id) },
+                                set: { isExpanded in
+                                    if isExpanded {
+                                        expandedMonths.insert(section.id)
+                                    } else {
+                                        expandedMonths.remove(section.id)
+                                    }
+                                }
+                            )
+                        ) {
+                            VStack(spacing: 6) {
+                                ForEach(section.days, id: \.self) { day in
+                                    sidebarButton(
+                                        title: day.shortDateString,
+                                        subtitle: Calendar.current.isDateInToday(day) ? "Today" : nil,
+                                        trailing: durationForDay(day).formattedHoursMinutes,
+                                        isSelected: selectedItem == .day(day)
+                                    ) {
+                                        selectedItem = .day(day)
+                                        splitVisibility = .all
+                                    }
+                                }
+                            }
+                            .padding(.top, 8)
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(section.title)
+                                        .font(.headline)
+                                    Text("\(section.days.count) logged day\(section.days.count == 1 ? "" : "s")")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Text("Avg per logged day")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text(section.average.formattedHoursMinutes)
+                                    .font(.system(.body, design: .monospaced))
                                     .foregroundStyle(.secondary)
                             }
                         }
-                        Spacer()
-                        Text(durationForDay(day).formattedHoursMinutes)
-                            .font(.system(.body, design: .monospaced))
-                            .foregroundStyle(.secondary)
+                        .padding(.vertical, 2)
                     }
-                    .tag(day)
-                    .padding(.vertical, 2)
                 }
             }
+            .padding(12)
         }
-        .listStyle(.sidebar)
-        .frame(minWidth: 220)
     }
 
     private func refreshDays() {
-        days = persistenceService.daysWithData()
+        let days = persistenceService.daysWithData()
+        var durations: [Date: TimeInterval] = [:]
+        for day in days {
+            durations[day] = computedDurationForDay(day)
+        }
+        dayDurations = durations
+        monthSections = buildMonthSections(from: days, durations: durations)
+
+        var expanded = expandedMonths.intersection(Set(monthSections.map(\.id)))
+        if case .day(let selectedDay) = selectedItem,
+           let selectedMonth = Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: selectedDay)) {
+            expanded.insert(selectedMonth)
+        }
+        expandedMonths = expanded
     }
 
     private func durationForDay(_ day: Date) -> TimeInterval {
+        dayDurations[day] ?? 0
+    }
+
+    private func computedDurationForDay(_ day: Date) -> TimeInterval {
         let total = persistenceService.durationForDay(day)
         if timerService.isRunning && Calendar.current.isDateInToday(day) {
             return total + timerService.currentIntervalElapsed
         }
         return total
     }
+
+    private func buildMonthSections(from days: [Date], durations: [Date: TimeInterval]) -> [DashboardMonthSection] {
+        let calendar = Calendar.current
+        let grouped = Dictionary(grouping: days) { day in
+            calendar.date(from: calendar.dateComponents([.year, .month], from: day))!
+        }
+
+        return grouped.keys
+            .sorted(by: >)
+            .map { monthStart in
+                let monthDays = grouped[monthStart, default: []].sorted(by: >)
+                let total = monthDays.reduce(0) { $0 + (durations[$1] ?? 0) }
+                let average = monthDays.isEmpty ? 0 : total / Double(monthDays.count)
+                return DashboardMonthSection(
+                    monthStart: monthStart,
+                    title: monthStart.monthYearString,
+                    average: average,
+                    days: monthDays
+                )
+            }
+    }
+
+    private func showOverview() {
+        selectedItem = .overview
+        splitVisibility = .all
+        expandedMonths.removeAll()
+    }
+
+    @ViewBuilder
+    private func sidebarButton(
+        title: String,
+        subtitle: String?,
+        trailing: String?,
+        isSelected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                if let trailing {
+                    Text(trailing)
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isSelected ? Color.white.opacity(0.18) : Color.clear)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+extension Notification.Name {
+    static let activeTrackShowDashboardOverview = Notification.Name("ActiveTrackShowDashboardOverview")
 }

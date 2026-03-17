@@ -2,15 +2,18 @@ import SwiftUI
 import Charts
 
 struct DailyChartView: View {
-    let timerService: TimerService
-    let persistenceService: PersistenceService
-    @State private var data: [DailyTotal] = []
+    let data: [DailyTotal]
 
     var body: some View {
         VStack(alignment: .leading) {
-            Text("Last 14 Days")
-                .font(.headline)
-                .padding(.bottom, 4)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Last 14 Days")
+                    .font(.headline)
+                Text("Average: \(averageDuration.formattedHoursMinutes) per day")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.bottom, 4)
 
             if data.allSatisfy({ $0.duration == 0 }) {
                 ContentUnavailableView {
@@ -20,13 +23,21 @@ struct DailyChartView: View {
                 }
                 .frame(maxHeight: .infinity)
             } else {
-                Chart(data) { item in
-                    BarMark(
-                        x: .value("Day", item.date, unit: .day),
-                        y: .value("Hours", item.duration / 3600)
-                    )
-                    .foregroundStyle(.blue.gradient)
-                    .cornerRadius(4)
+                Chart {
+                    ForEach(data) { item in
+                        BarMark(
+                            x: .value("Day", item.date, unit: .day),
+                            y: .value("Hours", item.duration / 3600)
+                        )
+                        .foregroundStyle(.blue.gradient)
+                        .cornerRadius(4)
+                    }
+
+                    if averageDuration > 0 {
+                        RuleMark(y: .value("Average", averageDuration / 3600))
+                            .foregroundStyle(.secondary)
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [5, 4]))
+                    }
                 }
                 .chartXAxis {
                     AxisMarks(values: .stride(by: .day, count: 2)) { value in
@@ -44,14 +55,13 @@ struct DailyChartView: View {
                         }
                     }
                 }
-                .frame(maxHeight: .infinity)
+                .frame(height: 320)
             }
         }
-        .onAppear { refreshData() }
-        .onChange(of: timerService.isRunning) { refreshData() }
     }
 
-    private func refreshData() {
-        data = persistenceService.dailyTotals(days: 14)
+    private var averageDuration: TimeInterval {
+        guard !data.isEmpty else { return 0 }
+        return data.reduce(0) { $0 + $1.duration } / Double(data.count)
     }
 }

@@ -2,6 +2,7 @@ import XCTest
 import SwiftData
 @testable import ActiveTrack
 
+@MainActor
 final class PersistenceServiceTests: XCTestCase {
     private var container: ModelContainer!
     private var context: ModelContext!
@@ -129,6 +130,40 @@ final class PersistenceServiceTests: XCTestCase {
 
         let nonZero = totals.filter { $0.duration > 0 }
         XCTAssertEqual(nonZero.count, 3)
+    }
+
+    func testWeeklyTotalsSplitCrossWeekInterval() {
+        let calendar = Calendar.current
+        let currentWeekStart = calendar.date(
+            from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: .now)
+        )!
+
+        let start = currentWeekStart.addingTimeInterval(-3600)
+        let end = currentWeekStart.addingTimeInterval(7200)
+        context.insert(ActiveInterval(startDate: start, endDate: end))
+        try! context.save()
+
+        let totals = service.weeklyTotals(weeks: 2)
+        XCTAssertEqual(totals.count, 2)
+        XCTAssertEqual(totals[0].duration, 3600, accuracy: 2)
+        XCTAssertEqual(totals[1].duration, 7200, accuracy: 2)
+    }
+
+    func testMonthlyTotalsSplitCrossMonthInterval() {
+        let calendar = Calendar.current
+        let currentMonthStart = calendar.date(
+            from: calendar.dateComponents([.year, .month], from: .now)
+        )!
+
+        let start = currentMonthStart.addingTimeInterval(-3600)
+        let end = currentMonthStart.addingTimeInterval(7200)
+        context.insert(ActiveInterval(startDate: start, endDate: end))
+        try! context.save()
+
+        let totals = service.monthlyTotals(months: 2)
+        XCTAssertEqual(totals.count, 2)
+        XCTAssertEqual(totals[0].duration, 3600, accuracy: 2)
+        XCTAssertEqual(totals[1].duration, 7200, accuracy: 2)
     }
 
     func testIntervalsForDay() {
