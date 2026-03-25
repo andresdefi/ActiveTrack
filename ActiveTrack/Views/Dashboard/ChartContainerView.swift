@@ -42,11 +42,7 @@ struct ChartContainerView: View {
                 }
 
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-                    DashboardMetricCard(
-                        title: "Today",
-                        value: timerService.displayTime.formattedHoursMinutes,
-                        caption: timerService.isRunning ? "Live total including current session" : "Tracked so far today"
-                    )
+                    LiveTodayDashboardMetricCard(timerService: timerService)
                     DashboardMetricCard(
                         title: "Average / Day",
                         value: averageDuration(for: dailyData).formattedHoursMinutes,
@@ -128,6 +124,18 @@ private protocol DurationReadable {
 extension DailyTotal: DurationReadable {}
 extension WeeklyTotal: DurationReadable {}
 extension MonthlyTotal: DurationReadable {}
+
+private struct LiveTodayDashboardMetricCard: View {
+    let timerService: TimerService
+
+    var body: some View {
+        DashboardMetricCard(
+            title: "Today",
+            value: timerService.displayTime.formattedHoursMinutes,
+            caption: timerService.isRunning ? "Live total including current session" : "Tracked so far today"
+        )
+    }
+}
 
 private struct DashboardMetricCard: View {
     let title: String

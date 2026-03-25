@@ -96,6 +96,7 @@ final class TimerService {
 
     private var timer: Timer?
     private var midnightTimer: Timer?
+    private var targetTimer: Timer?
     /// Cached start date of the current interval. Keep timer math on value
     /// types to avoid touching SwiftData model getters on tick callbacks.
     private var currentIntervalStartDate: Date?
@@ -159,12 +160,14 @@ final class TimerService {
         scheduleMidnightRollover()
         normalizeTargetStateForCurrentDay()
         evaluateTargetIfNeeded()
+        refreshTargetDeadline()
     }
 
     deinit {
         MainActor.assumeIsolated {
             timer?.invalidate()
             midnightTimer?.invalidate()
+            targetTimer?.invalidate()
             if let sleepObserver {
                 NSWorkspace.shared.notificationCenter.removeObserver(sleepObserver)
             }
@@ -188,6 +191,7 @@ final class TimerService {
                 currentIntervalElapsed = 0
                 lastError = nil
                 startTicking()
+                refreshTargetDeadline()
                 notifyStatusDidChange()
                 HealthLog.event("timer_start")
             } catch {
@@ -203,6 +207,7 @@ final class TimerService {
         currentIntervalElapsed = 0
         lastError = nil
         startTicking()
+        refreshTargetDeadline()
         notifyStatusDidChange()
         HealthLog.event("timer_start_in_memory")
     }
@@ -238,6 +243,7 @@ final class TimerService {
         currentIntervalStartDate = nil
         currentIntervalElapsed = 0
         lastError = nil
+        refreshTargetDeadline()
         notifyStatusDidChange()
         HealthLog.event("timer_pause_in_memory")
     }
@@ -253,6 +259,7 @@ final class TimerService {
     func refreshTodayTotal() {
         guard persistenceEnabled, let persistenceService else { return }
         todayTotal = persistenceService.durationForDay(.now, completedOnly: true)
+        refreshTargetDeadline()
     }
 
     func setTarget(duration: TimeInterval, mode: TimerTargetMode) {
@@ -279,6 +286,7 @@ final class TimerService {
             ]
         )
         evaluateTargetIfNeeded()
+        refreshTargetDeadline()
     }
 
     func clearTarget() {
@@ -290,6 +298,7 @@ final class TimerService {
         reachedTargetReferenceDay = nil
         persistTargetState()
         persistReachedTargetState()
+        refreshTargetDeadline()
         HealthLog.event("target_cleared")
     }
 
@@ -413,13 +422,7 @@ final class TimerService {
 
     // Internal for @testable access in tests
     func tick() {
-        guard let startDate = currentIntervalStartDate else { return }
-        currentIntervalElapsed = Date.now.timeIntervalSince(startDate)
-        evaluateTargetIfNeeded()
-
-        if !Calendar.current.isDateInToday(startDate) {
-            handleMidnightRollover()
-        }
+        refreshCurrentIntervalElapsed()
     }
 
     private func scheduleMidnightRollover() {
@@ -554,6 +557,39 @@ final class TimerService {
         }
 
         NotificationCenter.default.post(name: .activeTrackTargetReached, object: nil)
+    }
+
+    private func refreshCurrentIntervalElapsed() {
+        guard let startDate = currentIntervalStartDate else { return }
+        currentIntervalElapsed = Date.now.timeIntervalSince(startDate)
+    }
+
+    private func refreshTargetDeadline() {
+        targetTimer?.invalidate()
+        targetTimer = nil
+
+        guard isTargetActive else { return }
+        evaluateTargetIfNeeded()
+        guard isTargetActive, isRunning, let remainingTargetTime else { return }
+
+        let scheduled = Timer.scheduledTimer(withTimeInterval: max(remainingTargetTime, 0.05), repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { [weak self] in
+                self?.handleTargetDeadlineReached()
+            }
+        }
+        RunLoop.current.add(scheduled, forMode: .common)
+        targetTimer = scheduled
+    }
+
+    private func handleTargetDeadlineReached() {
+        targetTimer?.invalidate()
+        targetTimer = nil
+        refreshCurrentIntervalElapsed()
+        evaluateTargetIfNeeded()
+
+        if isTargetActive {
+            refreshTargetDeadline()
+        }
     }
 
     private func clearTargetForNewDay() {

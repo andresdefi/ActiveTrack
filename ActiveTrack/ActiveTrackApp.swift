@@ -10,7 +10,7 @@ private let logger_app = Logger(subsystem: "com.activetrack.app", category: "App
 /// Manages the NSStatusItem directly via AppKit, bypassing MenuBarExtra's
 /// label hosting which doesn't support reactive SwiftUI updates.
 @MainActor
-final class StatusBarController {
+final class StatusBarController: NSObject, NSPopoverDelegate {
     private enum StatusAppearance {
         case idle
         case paused
@@ -63,13 +63,12 @@ final class StatusBarController {
         self.persistenceService = persistenceService
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-
         popover = NSPopover()
+        super.init()
+
         popover.contentSize = NSSize(width: 280, height: 240)
         popover.behavior = .transient
-        popover.contentViewController = NSHostingController(
-            rootView: MenuBarPopoverView(timerService: timerService, persistenceService: persistenceService)
-        )
+        popover.delegate = self
 
         if let button = statusItem.button {
             button.image = Self.idleImage
@@ -96,10 +95,14 @@ final class StatusBarController {
     }
 
     private func startUpdateTimer() {
-        guard updateTimer == nil else { return }
-        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        stopUpdateTimer()
+        let timer = Timer.scheduledTimer(withTimeInterval: secondsUntilNextStatusTitleChange(), repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { [weak self] in
-                self?.updateStatusItem()
+                guard let self else { return }
+                self.updateStatusItem()
+                if self.timerService.isRunning {
+                    self.startUpdateTimer()
+                }
             }
         }
         RunLoop.current.add(timer, forMode: .common)
@@ -118,6 +121,14 @@ final class StatusBarController {
             stopUpdateTimer()
         }
         updateStatusItem()
+    }
+
+    private func secondsUntilNextStatusTitleChange() -> TimeInterval {
+        let remainder = timerService.displayTime.truncatingRemainder(dividingBy: 60)
+        if remainder <= 0.001 {
+            return 60
+        }
+        return max(60 - remainder, 0.1)
     }
 
     private func observeTimerStatus() {
@@ -187,7 +198,14 @@ final class StatusBarController {
     private func showPopover() {
         guard let button = statusItem.button else { return }
 
+        if popover.contentViewController == nil {
+            popover.contentViewController = NSHostingController(
+                rootView: MenuBarPopoverView(timerService: timerService, persistenceService: persistenceService)
+            )
+        }
+
         if let contentView = popover.contentViewController?.view {
+            contentView.layoutSubtreeIfNeeded()
             let fittingSize = contentView.fittingSize
             popover.contentSize = NSSize(width: 280, height: min(max(fittingSize.height, 180), 480))
         }
@@ -206,6 +224,10 @@ final class StatusBarController {
         } else {
             showPopover()
         }
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        popover.contentViewController = nil
     }
 }
 

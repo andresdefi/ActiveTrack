@@ -12,7 +12,6 @@ struct TodaySummaryView: View {
             Text(timerService.displayTime.formattedHoursMinutesSeconds)
                 .font(.system(.title, design: .monospaced, weight: .medium))
                 .contentTransition(.numericText())
-                .animation(.default, value: timerService.displayTime)
 
             if timerService.isRunning {
                 HStack(spacing: 4) {

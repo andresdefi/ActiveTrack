@@ -10,17 +10,8 @@ struct DayDetailView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                VStack(alignment: .leading) {
-                    Text(day.shortDateString)
-                        .font(.title2.bold())
-                    Text("Total: \(displayTotal.formattedHoursMinutes)")
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-            .padding(.bottom, 8)
+            LiveDayHeader(day: day, total: total, timerService: timerService)
+                .padding(.bottom, 8)
 
             if intervals.isEmpty {
                 ContentUnavailableView {
@@ -52,16 +43,35 @@ struct DayDetailView: View {
         .onChange(of: timerService.isRunning) { refreshData() }
     }
 
+    private func refreshData() {
+        let dayIntervals = persistenceService.intervalsForDay(day)
+        intervals = dayIntervals
+        total = dayIntervals.reduce(0) { $0 + $1.duration }
+    }
+}
+
+private struct LiveDayHeader: View {
+    let day: Date
+    let total: TimeInterval
+    let timerService: TimerService
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading) {
+                Text(day.shortDateString)
+                    .font(.title2.bold())
+                Text("Total: \(displayTotal.formattedHoursMinutes)")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+    }
+
     private var displayTotal: TimeInterval {
         if timerService.isRunning && Calendar.current.isDateInToday(day) {
             return total + timerService.currentIntervalElapsed
         }
         return total
-    }
-
-    private func refreshData() {
-        let dayIntervals = persistenceService.intervalsForDay(day)
-        intervals = dayIntervals
-        total = dayIntervals.reduce(0) { $0 + $1.duration }
     }
 }

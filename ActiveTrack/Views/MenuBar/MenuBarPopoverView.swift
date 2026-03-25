@@ -7,7 +7,7 @@ struct MenuBarPopoverView: View {
     @Environment(\.openWindow) private var openWindow
     @AppStorage("lastSeenReleaseNotesVersion") private var lastSeenReleaseNotesVersion = ""
     @State private var showingWhatsNew = false
-    private let currentReleaseNotesVersion = "1.2.2"
+    private let currentReleaseNotesVersion = "1.2.3"
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
@@ -121,11 +121,11 @@ struct MenuBarPopoverView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("What's New in \(currentReleaseNotesVersion)")
                 .font(.title3.bold())
-            Text("• Added dashboard summary cards and richer daily, weekly, and monthly charts")
-            Text("• Added total vs average-per-day chart views for weekly and monthly trends")
-            Text("• Grouped history sidebar by month with overview navigation")
-            Text("• Improved dashboard and menu bar layout behavior")
-            Text("• Hardened persistence reads and crash recovery handling")
+            Text("• Reduced menu bar CPU usage by throttling status updates and removing per-second timer animation")
+            Text("• Lazily create and tear down the popover content so hidden UI stops observing live timer changes")
+            Text("• Isolated live timer metrics from dashboard charts and day detail history to cut redraw work")
+            Text("• Switched target completion checks from per-second polling to a one-shot deadline timer")
+            Text("• Removed redundant midnight checks from the steady-state timer tick path")
             HStack {
                 Spacer()
                 Button("Done") {
