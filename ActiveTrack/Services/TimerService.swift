@@ -3,12 +3,37 @@ import SwiftData
 import AppKit
 import os.log
 
+enum TimerTargetMode: String, CaseIterable, Identifiable {
+    case fromNow = "from_now"
+    case todayTotal = "today_total"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .fromNow:
+            return "From Now"
+        case .todayTotal:
+            return "Today Total"
+        }
+    }
+
+    var summaryText: String {
+        switch self {
+        case .fromNow:
+            return "from now"
+        case .todayTotal:
+            return "for today"
+        }
+    }
+}
+
 enum HealthLog {
     private static let queue = DispatchQueue(label: "com.activetrack.healthlog")
 
     static func event(_ name: String, metadata: [String: String] = [:]) {
         queue.async {
-            let timestamp = ISO8601DateFormatter().string(from: .now)
+            let timestamp = Date.now.ISO8601Format()
             let details = metadata
                 .sorted(by: { $0.key < $1.key })
                 .map { "\($0.key)=\($0.value)" }
@@ -46,12 +71,28 @@ private let logger = Logger(subsystem: "com.activetrack.app", category: "TimerSe
 @MainActor
 @Observable
 final class TimerService {
+    private enum DefaultsKey {
+        static let targetDuration = "timerTarget.duration"
+        static let targetMode = "timerTarget.mode"
+        static let targetBaseline = "timerTarget.baseline"
+        static let targetReferenceDay = "timerTarget.referenceDay"
+        static let reachedTargetDuration = "timerTarget.reachedDuration"
+        static let reachedTargetMode = "timerTarget.reachedMode"
+        static let reachedTargetReferenceDay = "timerTarget.reachedReferenceDay"
+    }
+
     private let persistenceEnabled = true
     private let dashboardSafeMode = false
+    private let userDefaults: UserDefaults
     private(set) var isRunning = false
     private(set) var todayTotal: TimeInterval = 0
     private(set) var currentIntervalElapsed: TimeInterval = 0
     private(set) var lastError: PersistenceError?
+    private(set) var targetDuration: TimeInterval?
+    private(set) var targetMode: TimerTargetMode = .fromNow
+    private(set) var targetBaseline: TimeInterval = 0
+    private(set) var reachedTargetDuration: TimeInterval?
+    private(set) var reachedTargetMode: TimerTargetMode?
 
     private var timer: Timer?
     private var midnightTimer: Timer?
@@ -61,9 +102,33 @@ final class TimerService {
     private var persistenceService: PersistenceService?
     private var sleepObserver: Any?
     private var wakeObserver: Any?
+    private var targetReferenceDay: Date?
+    private var reachedTargetReferenceDay: Date?
 
     var displayTime: TimeInterval {
         todayTotal + currentIntervalElapsed
+    }
+
+    var isTargetActive: Bool {
+        targetDuration != nil
+    }
+
+    var hasReachedTarget: Bool {
+        reachedTargetDuration != nil
+    }
+
+    var targetProgress: TimeInterval {
+        switch targetMode {
+        case .fromNow:
+            return max(displayTime - targetBaseline, 0)
+        case .todayTotal:
+            return displayTime
+        }
+    }
+
+    var remainingTargetTime: TimeInterval? {
+        guard let targetDuration else { return nil }
+        return max(targetDuration - targetProgress, 0)
     }
 
     var isPersistenceEnabled: Bool {
@@ -74,10 +139,13 @@ final class TimerService {
         dashboardSafeMode
     }
 
-    init() {}
+    init(userDefaults: UserDefaults = .standard) {
+        self.userDefaults = userDefaults
+        loadPersistedTargetState()
+    }
 
-    convenience init(persistenceService: PersistenceService) {
-        self.init()
+    convenience init(persistenceService: PersistenceService, userDefaults: UserDefaults = .standard) {
+        self.init(userDefaults: userDefaults)
         configure(persistenceService: persistenceService)
     }
 
@@ -89,6 +157,8 @@ final class TimerService {
             refreshTodayTotal()
         }
         scheduleMidnightRollover()
+        normalizeTargetStateForCurrentDay()
+        evaluateTargetIfNeeded()
     }
 
     deinit {
@@ -106,6 +176,7 @@ final class TimerService {
 
     func start() {
         guard !isRunning else { return }
+        dismissReachedTarget()
 
         if persistenceEnabled, let persistenceService {
             do {
@@ -117,6 +188,7 @@ final class TimerService {
                 currentIntervalElapsed = 0
                 lastError = nil
                 startTicking()
+                notifyStatusDidChange()
                 HealthLog.event("timer_start")
             } catch {
                 logger.error("Failed to create interval: \(error.localizedDescription)")
@@ -131,6 +203,7 @@ final class TimerService {
         currentIntervalElapsed = 0
         lastError = nil
         startTicking()
+        notifyStatusDidChange()
         HealthLog.event("timer_start_in_memory")
     }
 
@@ -148,6 +221,7 @@ final class TimerService {
                 currentIntervalStartDate = nil
                 currentIntervalElapsed = 0
                 refreshTodayTotal()
+                notifyStatusDidChange()
                 HealthLog.event("timer_pause")
             } catch {
                 logger.error("Failed to close interval: \(error.localizedDescription)")
@@ -164,6 +238,7 @@ final class TimerService {
         currentIntervalStartDate = nil
         currentIntervalElapsed = 0
         lastError = nil
+        notifyStatusDidChange()
         HealthLog.event("timer_pause_in_memory")
     }
 
@@ -180,6 +255,52 @@ final class TimerService {
         todayTotal = persistenceService.durationForDay(.now, completedOnly: true)
     }
 
+    func setTarget(duration: TimeInterval, mode: TimerTargetMode) {
+        let normalizedDuration = max(duration, 0)
+        guard normalizedDuration > 0 else {
+            clearTarget()
+            return
+        }
+
+        targetDuration = normalizedDuration
+        targetMode = mode
+        targetBaseline = mode == .fromNow ? displayTime : 0
+        targetReferenceDay = Calendar.current.startOfDay(for: .now)
+        reachedTargetDuration = nil
+        reachedTargetMode = nil
+        reachedTargetReferenceDay = nil
+        persistTargetState()
+        persistReachedTargetState()
+        HealthLog.event(
+            "target_set",
+            metadata: [
+                "duration_seconds": String(Int(normalizedDuration)),
+                "mode": mode.rawValue
+            ]
+        )
+        evaluateTargetIfNeeded()
+    }
+
+    func clearTarget() {
+        targetDuration = nil
+        targetBaseline = 0
+        targetReferenceDay = nil
+        reachedTargetDuration = nil
+        reachedTargetMode = nil
+        reachedTargetReferenceDay = nil
+        persistTargetState()
+        persistReachedTargetState()
+        HealthLog.event("target_cleared")
+    }
+
+    func dismissReachedTarget() {
+        guard hasReachedTarget else { return }
+        reachedTargetDuration = nil
+        reachedTargetMode = nil
+        reachedTargetReferenceDay = nil
+        persistReachedTargetState()
+    }
+
     // MARK: - Private
 
     private func observeSleep() {
@@ -188,7 +309,7 @@ final class TimerService {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated { [weak self] in
                 self?.handleSleep()
             }
         }
@@ -197,7 +318,7 @@ final class TimerService {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated { [weak self] in
                 self?.handleWake()
             }
         }
@@ -214,6 +335,8 @@ final class TimerService {
         HealthLog.event("system_wake")
         scheduleMidnightRollover()
         refreshTodayTotal()
+        normalizeTargetStateForCurrentDay()
+        notifyStatusDidChange()
     }
 
     func resetToday() {
@@ -225,6 +348,8 @@ final class TimerService {
             todayTotal = 0
             currentIntervalElapsed = 0
             currentIntervalStartDate = nil
+            clearTarget()
+            notifyStatusDidChange()
             HealthLog.event("reset_today_in_memory")
             return
         }
@@ -235,6 +360,8 @@ final class TimerService {
             currentIntervalElapsed = 0
             currentIntervalStartDate = nil
             lastError = nil
+            clearTarget()
+            notifyStatusDidChange()
             HealthLog.event("reset_today")
         } catch {
             logger.error("Failed to reset today: \(error.localizedDescription)")
@@ -271,7 +398,7 @@ final class TimerService {
     private func startTicking() {
         stopTicking()
         let scheduled = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated { [weak self] in
                 self?.tick()
             }
         }
@@ -284,9 +411,11 @@ final class TimerService {
         timer = nil
     }
 
-    private func tick() {
+    // Internal for @testable access in tests
+    func tick() {
         guard let startDate = currentIntervalStartDate else { return }
         currentIntervalElapsed = Date.now.timeIntervalSince(startDate)
+        evaluateTargetIfNeeded()
 
         if !Calendar.current.isDateInToday(startDate) {
             handleMidnightRollover()
@@ -299,7 +428,7 @@ final class TimerService {
         guard let tomorrow = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: .now)) else { return }
         let delay = tomorrow.timeIntervalSince(.now)
         let scheduled = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated { [weak self] in
                 self?.handleMidnightRollover()
             }
         }
@@ -309,6 +438,8 @@ final class TimerService {
 
     // Internal for @testable access in tests
     func handleMidnightRollover() {
+        clearTargetForNewDay()
+
         if !persistenceEnabled {
             let calendar = Calendar.current
             if isRunning, let startDate = currentIntervalStartDate, !calendar.isDateInToday(startDate) {
@@ -371,6 +502,7 @@ final class TimerService {
 
         refreshTodayTotal()
         scheduleMidnightRollover()
+        notifyStatusDidChange()
     }
 
     @discardableResult
@@ -389,5 +521,122 @@ final class TimerService {
         }
 
         return keepingMostRecent ? mostRecent : nil
+    }
+
+    private func evaluateTargetIfNeeded() {
+        guard let targetDuration, isTargetActive else { return }
+        guard targetProgress >= targetDuration else { return }
+        handleTargetReached()
+    }
+
+    private func handleTargetReached() {
+        guard let duration = targetDuration else { return }
+        let mode = targetMode
+
+        targetDuration = nil
+        targetBaseline = 0
+        targetReferenceDay = nil
+        reachedTargetDuration = duration
+        reachedTargetMode = mode
+        reachedTargetReferenceDay = Calendar.current.startOfDay(for: .now)
+        persistTargetState()
+        persistReachedTargetState()
+        HealthLog.event(
+            "target_reached",
+            metadata: [
+                "duration_seconds": String(Int(duration)),
+                "mode": mode.rawValue
+            ]
+        )
+
+        if isRunning {
+            pause()
+        }
+
+        NotificationCenter.default.post(name: .activeTrackTargetReached, object: nil)
+    }
+
+    private func clearTargetForNewDay() {
+        guard isTargetActive || hasReachedTarget else { return }
+        clearTarget()
+        HealthLog.event("target_cleared_new_day")
+    }
+
+    private func normalizeTargetStateForCurrentDay() {
+        let todayStart = Calendar.current.startOfDay(for: .now)
+
+        if let targetReferenceDay, !Calendar.current.isDate(targetReferenceDay, inSameDayAs: todayStart) {
+            targetDuration = nil
+            targetBaseline = 0
+            self.targetReferenceDay = nil
+        }
+
+        if let reachedTargetReferenceDay, !Calendar.current.isDate(reachedTargetReferenceDay, inSameDayAs: todayStart) {
+            reachedTargetDuration = nil
+            reachedTargetMode = nil
+            self.reachedTargetReferenceDay = nil
+        }
+
+        persistTargetState()
+        persistReachedTargetState()
+    }
+
+    private func loadPersistedTargetState() {
+        if let rawMode = userDefaults.string(forKey: DefaultsKey.targetMode),
+           let persistedMode = TimerTargetMode(rawValue: rawMode) {
+            targetMode = persistedMode
+        }
+
+        let persistedTargetDuration = userDefaults.double(forKey: DefaultsKey.targetDuration)
+        if persistedTargetDuration > 0 {
+            targetDuration = persistedTargetDuration
+            targetBaseline = userDefaults.double(forKey: DefaultsKey.targetBaseline)
+            if userDefaults.object(forKey: DefaultsKey.targetReferenceDay) != nil {
+                targetReferenceDay = Date(timeIntervalSince1970: userDefaults.double(forKey: DefaultsKey.targetReferenceDay))
+            }
+        }
+
+        let persistedReachedDuration = userDefaults.double(forKey: DefaultsKey.reachedTargetDuration)
+        if persistedReachedDuration > 0 {
+            reachedTargetDuration = persistedReachedDuration
+
+            if let rawReachedMode = userDefaults.string(forKey: DefaultsKey.reachedTargetMode),
+               let persistedReachedMode = TimerTargetMode(rawValue: rawReachedMode) {
+                reachedTargetMode = persistedReachedMode
+            }
+
+            if userDefaults.object(forKey: DefaultsKey.reachedTargetReferenceDay) != nil {
+                reachedTargetReferenceDay = Date(timeIntervalSince1970: userDefaults.double(forKey: DefaultsKey.reachedTargetReferenceDay))
+            }
+        }
+    }
+
+    private func persistTargetState() {
+        if let targetDuration {
+            userDefaults.set(targetDuration, forKey: DefaultsKey.targetDuration)
+            userDefaults.set(targetMode.rawValue, forKey: DefaultsKey.targetMode)
+            userDefaults.set(targetBaseline, forKey: DefaultsKey.targetBaseline)
+            userDefaults.set(targetReferenceDay?.timeIntervalSince1970, forKey: DefaultsKey.targetReferenceDay)
+        } else {
+            userDefaults.removeObject(forKey: DefaultsKey.targetDuration)
+            userDefaults.removeObject(forKey: DefaultsKey.targetBaseline)
+            userDefaults.removeObject(forKey: DefaultsKey.targetReferenceDay)
+        }
+    }
+
+    private func persistReachedTargetState() {
+        if let reachedTargetDuration, let reachedTargetMode {
+            userDefaults.set(reachedTargetDuration, forKey: DefaultsKey.reachedTargetDuration)
+            userDefaults.set(reachedTargetMode.rawValue, forKey: DefaultsKey.reachedTargetMode)
+            userDefaults.set(reachedTargetReferenceDay?.timeIntervalSince1970, forKey: DefaultsKey.reachedTargetReferenceDay)
+        } else {
+            userDefaults.removeObject(forKey: DefaultsKey.reachedTargetDuration)
+            userDefaults.removeObject(forKey: DefaultsKey.reachedTargetMode)
+            userDefaults.removeObject(forKey: DefaultsKey.reachedTargetReferenceDay)
+        }
+    }
+
+    private func notifyStatusDidChange() {
+        NotificationCenter.default.post(name: .activeTrackTimerStatusChanged, object: nil)
     }
 }

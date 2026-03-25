@@ -47,6 +47,7 @@ struct MenuBarPopoverView: View {
 
                 TodaySummaryView(timerService: timerService)
                 TimerControlsView(timerService: timerService)
+                TargetTimerView(timerService: timerService)
 
                 Divider()
 
@@ -138,5 +139,156 @@ struct MenuBarPopoverView: View {
         }
         .padding(20)
         .frame(minWidth: 420)
+    }
+}
+
+private struct TargetTimerView: View {
+    let timerService: TimerService
+
+    @AppStorage("targetTimerDraftHours") private var draftHours = 6
+    @AppStorage("targetTimerDraftMinutes") private var draftMinutes = 0
+    @AppStorage("targetTimerDraftMode") private var draftModeRaw = TimerTargetMode.todayTotal.rawValue
+
+    private let minuteOptions = Array(stride(from: 0, through: 55, by: 5))
+
+    private var selectedDuration: TimeInterval {
+        TimeInterval((draftHours * 3600) + (draftMinutes * 60))
+    }
+
+    private var selectedMode: Binding<TimerTargetMode> {
+        Binding(
+            get: { TimerTargetMode(rawValue: draftModeRaw) ?? .todayTotal },
+            set: { draftModeRaw = $0.rawValue }
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Target")
+                    .font(.headline)
+
+                Spacer()
+
+                if timerService.hasReachedTarget {
+                    statusPill(title: "Reached", color: .orange)
+                } else if timerService.isTargetActive {
+                    statusPill(title: "Active", color: .blue)
+                }
+            }
+
+            if timerService.hasReachedTarget {
+                reachedCard
+            } else if timerService.isTargetActive {
+                activeCard
+            }
+
+            Picker("Count From", selection: selectedMode) {
+                ForEach(TimerTargetMode.allCases) { mode in
+                    Text(mode.title)
+                        .tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            HStack(spacing: 10) {
+                Picker("Hours", selection: $draftHours) {
+                    ForEach(0..<25, id: \.self) { hour in
+                        Text("\(hour)h")
+                            .tag(hour)
+                    }
+                }
+
+                Picker("Minutes", selection: $draftMinutes) {
+                    ForEach(minuteOptions, id: \.self) { minutes in
+                        Text("\(minutes)m")
+                            .tag(minutes)
+                    }
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+
+            HStack {
+                Button(timerService.isTargetActive ? "Update Target" : "Set Target") {
+                    timerService.setTarget(duration: selectedDuration, mode: selectedMode.wrappedValue)
+                }
+                .disabled(selectedDuration <= 0)
+
+                Spacer()
+
+                if timerService.hasReachedTarget {
+                    Button("Dismiss") {
+                        timerService.dismissReachedTarget()
+                    }
+                    .buttonStyle(.borderless)
+                } else if timerService.isTargetActive {
+                    Button("Clear") {
+                        timerService.clearTarget()
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+        }
+        .padding(12)
+        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .onAppear {
+            syncDraftWithTargetIfNeeded()
+        }
+        .onChange(of: timerService.targetDuration) {
+            syncDraftWithTargetIfNeeded()
+        }
+    }
+
+    private var activeCard: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let targetDuration = timerService.targetDuration {
+                Text("Tracking \(targetDuration.formattedHoursMinutes) \(timerService.targetMode.summaryText)")
+                    .font(.subheadline.weight(.semibold))
+                if let remainingTargetTime = timerService.remainingTargetTime {
+                    Text("Remaining: \(remainingTargetTime.formattedHoursMinutesSeconds)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(10)
+        .background(Color.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private var reachedCard: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Time reached")
+                .font(.subheadline.weight(.semibold))
+            if let reachedTargetDuration = timerService.reachedTargetDuration,
+               let reachedTargetMode = timerService.reachedTargetMode {
+                Text("Paused at \(reachedTargetDuration.formattedHoursMinutes) \(reachedTargetMode.summaryText). Press Start to keep tracking.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("The timer is paused. Press Start to keep tracking.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .background(Color.orange.opacity(0.14), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private func statusPill(title: String, color: Color) -> some View {
+        Text(title)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(color.opacity(0.14), in: Capsule())
+    }
+
+    private func syncDraftWithTargetIfNeeded() {
+        guard let targetDuration = timerService.targetDuration else { return }
+        draftModeRaw = timerService.targetMode.rawValue
+        let totalMinutes = Int(targetDuration / 60)
+        draftHours = min(totalMinutes / 60, 24)
+        draftMinutes = minuteOptions.min(by: { abs($0 - (totalMinutes % 60)) < abs($1 - (totalMinutes % 60)) }) ?? 0
     }
 }

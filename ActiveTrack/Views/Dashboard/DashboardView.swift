@@ -139,11 +139,12 @@ struct DashboardView: View {
     }
 
     private func refreshDays() {
-        let days = persistenceService.daysWithData()
-        var durations: [Date: TimeInterval] = [:]
-        for day in days {
-            durations[day] = computedDurationForDay(day)
+        var durations = persistenceService.allDayDurations()
+        if timerService.isRunning {
+            let today = Calendar.current.startOfDay(for: .now)
+            durations[today, default: 0] += timerService.currentIntervalElapsed
         }
+        let days = durations.keys.sorted(by: >)
         dayDurations = durations
         monthSections = buildMonthSections(from: days, durations: durations)
 
@@ -157,14 +158,6 @@ struct DashboardView: View {
 
     private func durationForDay(_ day: Date) -> TimeInterval {
         dayDurations[day] ?? 0
-    }
-
-    private func computedDurationForDay(_ day: Date) -> TimeInterval {
-        let total = persistenceService.durationForDay(day)
-        if timerService.isRunning && Calendar.current.isDateInToday(day) {
-            return total + timerService.currentIntervalElapsed
-        }
-        return total
     }
 
     private func buildMonthSections(from days: [Date], durations: [Date: TimeInterval]) -> [DashboardMonthSection] {
@@ -235,4 +228,6 @@ struct DashboardView: View {
 
 extension Notification.Name {
     static let activeTrackShowDashboardOverview = Notification.Name("ActiveTrackShowDashboardOverview")
+    static let activeTrackTargetReached = Notification.Name("ActiveTrackTargetReached")
+    static let activeTrackTimerStatusChanged = Notification.Name("ActiveTrackTimerStatusChanged")
 }

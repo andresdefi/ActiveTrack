@@ -1,5 +1,6 @@
 import XCTest
 import SwiftData
+import SQLite3
 @testable import ActiveTrack
 
 @MainActor
@@ -200,6 +201,72 @@ final class PersistenceServiceTests: XCTestCase {
 
         let days = service.daysWithData()
         XCTAssertEqual(days.count, 2)
+    }
+
+    func testAllDayDurationsSplitsCrossDayIntervals() {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today)!
+
+        let start = calendar.date(bySettingHour: 23, minute: 0, second: 0, of: yesterday)!
+        let end = calendar.date(bySettingHour: 2, minute: 0, second: 0, of: today)!
+        context.insert(ActiveInterval(startDate: start, endDate: end))
+        try! context.save()
+
+        let dayDurations = service.allDayDurations()
+        XCTAssertEqual(dayDurations[yesterday] ?? 0, 3600, accuracy: 2)
+        XCTAssertEqual(dayDurations[today] ?? 0, 7200, accuracy: 2)
+    }
+
+    func testChartDataMatchesSplitAggregations() {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today)!
+        let eightDaysAgo = calendar.date(byAdding: .day, value: -8, to: today)!
+        let fiveWeeksAgo = calendar.date(byAdding: .weekOfYear, value: -5, to: today)!
+
+        let intervals = [
+            ActiveInterval(
+                startDate: calendar.date(bySettingHour: 9, minute: 0, second: 0, of: today)!,
+                endDate: calendar.date(bySettingHour: 10, minute: 0, second: 0, of: today)!
+            ),
+            ActiveInterval(
+                startDate: calendar.date(bySettingHour: 11, minute: 0, second: 0, of: yesterday)!,
+                endDate: calendar.date(bySettingHour: 13, minute: 0, second: 0, of: yesterday)!
+            ),
+            ActiveInterval(
+                startDate: calendar.date(bySettingHour: 14, minute: 0, second: 0, of: eightDaysAgo)!,
+                endDate: calendar.date(bySettingHour: 15, minute: 30, second: 0, of: eightDaysAgo)!
+            ),
+            ActiveInterval(
+                startDate: calendar.date(bySettingHour: 8, minute: 0, second: 0, of: fiveWeeksAgo)!,
+                endDate: calendar.date(bySettingHour: 9, minute: 0, second: 0, of: fiveWeeksAgo)!
+            )
+        ]
+
+        for interval in intervals {
+            context.insert(interval)
+        }
+        try! context.save()
+
+        let expectedDaily = service.dailyTotals(days: 14)
+        let expectedWeekly = service.weeklyTotals(weeks: 12)
+        let expectedMonthly = service.monthlyTotals(months: 12)
+        let chartData = service.chartData(days: 14, weeks: 12, months: 12)
+
+        XCTAssertEqual(chartData.daily.map(\.date), expectedDaily.map(\.date))
+        XCTAssertEqual(chartData.weekly.map(\.weekStart), expectedWeekly.map(\.weekStart))
+        XCTAssertEqual(chartData.monthly.map(\.monthStart), expectedMonthly.map(\.monthStart))
+
+        for (actual, expected) in zip(chartData.daily, expectedDaily) {
+            XCTAssertEqual(actual.duration, expected.duration, accuracy: 2)
+        }
+        for (actual, expected) in zip(chartData.weekly, expectedWeekly) {
+            XCTAssertEqual(actual.duration, expected.duration, accuracy: 2)
+        }
+        for (actual, expected) in zip(chartData.monthly, expectedMonthly) {
+            XCTAssertEqual(actual.duration, expected.duration, accuracy: 2)
+        }
     }
 
     // MARK: - fetchOpenInterval Ordering
@@ -405,5 +472,159 @@ final class PersistenceServiceTests: XCTestCase {
         // Should include all 4 days: 3 days ago, 2 days ago, yesterday, today
         XCTAssertEqual(days.count, 4,
                        "Cross-day interval should register data for every day it spans")
+    }
+
+    // MARK: - SQLite Summary Maintenance
+
+    func testSQLiteSummaryUpdatesWhenClosingCrossDayInterval() throws {
+        let (sqliteService, storeURL, directory) = try makeSQLiteService()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today)!
+        let start = calendar.date(bySettingHour: 23, minute: 0, second: 0, of: yesterday)!
+        let end = calendar.date(bySettingHour: 2, minute: 0, second: 0, of: today)!
+
+        let interval = try sqliteService.createInterval(startDate: start)
+        try sqliteService.closeInterval(interval, endDate: end)
+
+        let durations = sqliteService.allDayDurations()
+        XCTAssertEqual(durations[yesterday] ?? 0, 3600, accuracy: 2)
+        XCTAssertEqual(durations[today] ?? 0, 7200, accuracy: 2)
+
+        let rows = try readDaySummaryRows(at: storeURL)
+        XCTAssertEqual(rows[yesterday] ?? 0, 3600, accuracy: 2)
+        XCTAssertEqual(rows[today] ?? 0, 7200, accuracy: 2)
+    }
+
+    func testSQLiteSummarySubtractsDeletedInterval() throws {
+        let (sqliteService, _, directory) = try makeSQLiteService()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        let start = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: today)!
+        let end = calendar.date(bySettingHour: 10, minute: 30, second: 0, of: today)!
+
+        let interval = try sqliteService.createInterval(startDate: start)
+        try sqliteService.closeInterval(interval, endDate: end)
+        XCTAssertEqual(sqliteService.allDayDurations()[today] ?? 0, 5400, accuracy: 2)
+
+        try sqliteService.deleteInterval(interval)
+        XCTAssertEqual(sqliteService.allDayDurations()[today] ?? 0, 0, accuracy: 1)
+        XCTAssertTrue(sqliteService.daysWithData().isEmpty)
+    }
+
+    func testSQLiteResetTodayClearsTodaySummaryButPreservesEarlierDays() throws {
+        let (sqliteService, _, directory) = try makeSQLiteService()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today)!
+
+        let spanningInterval = try sqliteService.createInterval(
+            startDate: calendar.date(bySettingHour: 23, minute: 0, second: 0, of: yesterday)!
+        )
+        try sqliteService.closeInterval(
+            spanningInterval,
+            endDate: calendar.date(bySettingHour: 2, minute: 0, second: 0, of: today)!
+        )
+
+        let todaysInterval = try sqliteService.createInterval(
+            startDate: calendar.date(bySettingHour: 8, minute: 0, second: 0, of: today)!
+        )
+        try sqliteService.closeInterval(
+            todaysInterval,
+            endDate: calendar.date(bySettingHour: 9, minute: 0, second: 0, of: today)!
+        )
+
+        try sqliteService.resetToday()
+
+        let durations = sqliteService.allDayDurations()
+        XCTAssertEqual(durations[yesterday] ?? 0, 3600, accuracy: 2)
+        XCTAssertNil(durations[today])
+    }
+
+    func testSQLiteStartupRebuildBackfillsDaySummary() throws {
+        let (sqliteService, storeURL, directory) = try makeSQLiteService()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today)!
+
+        let interval = try sqliteService.createInterval(
+            startDate: calendar.date(bySettingHour: 22, minute: 0, second: 0, of: yesterday)!
+        )
+        try sqliteService.closeInterval(
+            interval,
+            endDate: calendar.date(bySettingHour: 1, minute: 30, second: 0, of: today)!
+        )
+
+        try executeSQL(
+            at: storeURL,
+            sql: """
+            DELETE FROM AT_DAY_SUMMARY;
+            DELETE FROM AT_METADATA;
+            """
+        )
+
+        let rebuiltService = PersistenceService(modelContext: context, storeURL: storeURL)
+        let durations = rebuiltService.allDayDurations()
+        XCTAssertEqual(durations[yesterday] ?? 0, 7200, accuracy: 2)
+        XCTAssertEqual(durations[today] ?? 0, 5400, accuracy: 2)
+    }
+
+    private func makeSQLiteService() throws -> (PersistenceService, URL, URL) {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ActiveTrackTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let storeURL = directory.appendingPathComponent("Persistence.store")
+        let sqliteService = PersistenceService(modelContext: context, storeURL: storeURL)
+        return (sqliteService, storeURL, directory)
+    }
+
+    private func readDaySummaryRows(at storeURL: URL) throws -> [Date: TimeInterval] {
+        var rows: [Date: TimeInterval] = [:]
+        try withDatabase(at: storeURL) { db in
+            var statement: OpaquePointer?
+            let sql = """
+            SELECT ZDAYSTART, ZCOMPLETEDDURATION
+            FROM AT_DAY_SUMMARY
+            ORDER BY ZDAYSTART
+            """
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw XCTSkip("Failed to prepare summary query")
+            }
+            defer { sqlite3_finalize(statement) }
+
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let dayStart = Date(timeIntervalSinceReferenceDate: sqlite3_column_double(statement, 0))
+                rows[dayStart] = sqlite3_column_double(statement, 1)
+            }
+        }
+        return rows
+    }
+
+    private func executeSQL(at storeURL: URL, sql: String) throws {
+        try withDatabase(at: storeURL) { db in
+            guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
+                throw XCTSkip("Failed to execute sqlite statement")
+            }
+        }
+    }
+
+    private func withDatabase(at storeURL: URL, _ body: (OpaquePointer?) throws -> Void) throws {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(storeURL.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
+            if let db {
+                sqlite3_close(db)
+            }
+            throw XCTSkip("Failed to open sqlite store")
+        }
+        defer { sqlite3_close(db) }
+        try body(db)
     }
 }

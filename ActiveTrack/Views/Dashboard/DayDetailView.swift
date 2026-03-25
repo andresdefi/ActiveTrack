@@ -60,7 +60,8 @@ struct DayDetailView: View {
     }
 
     private func refreshData() {
-        intervals = persistenceService.intervalsForDay(day)
-        total = persistenceService.durationForDay(day)
+        let dayIntervals = persistenceService.intervalsForDay(day)
+        intervals = dayIntervals
+        total = dayIntervals.reduce(0) { $0 + $1.duration }
     }
 }

@@ -80,9 +80,38 @@ struct ChartContainerView: View {
     }
 
     private func refreshData() {
-        dailyData = persistenceService.dailyTotals(days: 14)
-        weeklyData = persistenceService.weeklyTotals(weeks: 12)
-        monthlyData = persistenceService.monthlyTotals(months: 12)
+        let chartData = persistenceService.chartData(days: 14, weeks: 12, months: 12)
+        dailyData = chartData.daily
+        weeklyData = chartData.weekly
+        monthlyData = chartData.monthly
+
+        guard timerService.isRunning else { return }
+        let runningElapsed = timerService.currentIntervalElapsed
+        guard runningElapsed > 0 else { return }
+
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        if let dailyIndex = dailyData.firstIndex(where: { $0.date == today }) {
+            dailyData[dailyIndex] = DailyTotal(date: today, duration: dailyData[dailyIndex].duration + runningElapsed)
+        }
+
+        let weekStart = calendar.date(
+            from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: today)
+        )
+        if let weekStart, let weeklyIndex = weeklyData.firstIndex(where: { $0.weekStart == weekStart }) {
+            weeklyData[weeklyIndex] = WeeklyTotal(
+                weekStart: weekStart,
+                duration: weeklyData[weeklyIndex].duration + runningElapsed
+            )
+        }
+
+        let monthStart = calendar.date(from: calendar.dateComponents([.year, .month], from: today))
+        if let monthStart, let monthlyIndex = monthlyData.firstIndex(where: { $0.monthStart == monthStart }) {
+            monthlyData[monthlyIndex] = MonthlyTotal(
+                monthStart: monthStart,
+                duration: monthlyData[monthlyIndex].duration + runningElapsed
+            )
+        }
     }
 
     private func averageDuration<T>(for items: [T]) -> TimeInterval where T: DurationReadable {

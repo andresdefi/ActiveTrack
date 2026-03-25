@@ -11,14 +11,24 @@ private let logger_app = Logger(subsystem: "com.activetrack.app", category: "App
 /// label hosting which doesn't support reactive SwiftUI updates.
 @MainActor
 final class StatusBarController {
+    private enum StatusAppearance {
+        case idle
+        case paused
+        case running
+    }
+
     private var statusItem: NSStatusItem
     private var popover: NSPopover
     private var updateTimer: Timer?
+    private var timerStatusObserver: Any?
+    private var targetReachedObserver: Any?
     private var hasRunThisDay = false
     private var trackedDayStart = Calendar.current.startOfDay(for: .now)
+    private var currentAppearance: StatusAppearance?
 
     private let timerService: TimerService
     private let persistenceService: PersistenceService
+    private let calendar = Calendar.autoupdatingCurrent
 
     private static let redDotImage: NSImage = {
         let size = NSSize(width: 7, height: 7)
@@ -68,18 +78,27 @@ final class StatusBarController {
         }
 
         updateStatusItem()
-        startUpdateTimer()
+        observeTimerStatus()
+        observeTargetReached()
+        reconcileStatusUpdates()
     }
 
     deinit {
         MainActor.assumeIsolated {
-            updateTimer?.invalidate()
+            stopUpdateTimer()
+            if let timerStatusObserver {
+                NotificationCenter.default.removeObserver(timerStatusObserver)
+            }
+            if let targetReachedObserver {
+                NotificationCenter.default.removeObserver(targetReachedObserver)
+            }
         }
     }
 
     private func startUpdateTimer() {
+        guard updateTimer == nil else { return }
         let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated { [weak self] in
                 self?.updateStatusItem()
             }
         }
@@ -87,9 +106,34 @@ final class StatusBarController {
         updateTimer = timer
     }
 
+    private func stopUpdateTimer() {
+        updateTimer?.invalidate()
+        updateTimer = nil
+    }
+
+    private func reconcileStatusUpdates() {
+        if timerService.isRunning {
+            startUpdateTimer()
+        } else {
+            stopUpdateTimer()
+        }
+        updateStatusItem()
+    }
+
+    private func observeTimerStatus() {
+        timerStatusObserver = NotificationCenter.default.addObserver(
+            forName: .activeTrackTimerStatusChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { [weak self] in
+                self?.reconcileStatusUpdates()
+            }
+        }
+    }
+
     private func updateStatusItem() {
         guard let button = statusItem.button else { return }
-        let calendar = Calendar.current
         let todayStart = calendar.startOfDay(for: .now)
 
         if todayStart != trackedDayStart {
@@ -99,31 +143,68 @@ final class StatusBarController {
 
         if timerService.isRunning {
             hasRunThisDay = true
-            button.image = Self.redDotImage
-            button.imagePosition = .imageLeading
-            button.title = " " + timerService.displayTime.compactFormatted
+            applyStatusAppearance(.running, title: " " + timerService.displayTime.compactFormatted, to: button)
         } else if timerService.todayTotal > 0 || hasRunThisDay {
-            button.image = Self.yellowDotImage
-            button.imagePosition = .imageLeading
-            button.title = " " + timerService.displayTime.compactFormatted
+            applyStatusAppearance(.paused, title: " " + timerService.displayTime.compactFormatted, to: button)
         } else {
-            button.image = Self.idleImage
-            button.imagePosition = .imageOnly
-            button.title = ""
+            applyStatusAppearance(.idle, title: "", to: button)
         }
+    }
+
+    private func applyStatusAppearance(_ appearance: StatusAppearance, title: String, to button: NSStatusBarButton) {
+        if currentAppearance != appearance {
+            switch appearance {
+            case .idle:
+                button.image = Self.idleImage
+                button.imagePosition = .imageOnly
+            case .paused:
+                button.image = Self.yellowDotImage
+                button.imagePosition = .imageLeading
+            case .running:
+                button.image = Self.redDotImage
+                button.imagePosition = .imageLeading
+            }
+            currentAppearance = appearance
+        }
+
+        if button.title != title {
+            button.title = title
+        }
+    }
+
+    private func observeTargetReached() {
+        targetReachedObserver = NotificationCenter.default.addObserver(
+            forName: .activeTrackTargetReached,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { [weak self] in
+                self?.showPopover()
+            }
+        }
+    }
+
+    private func showPopover() {
+        guard let button = statusItem.button else { return }
+
+        if let contentView = popover.contentViewController?.view {
+            let fittingSize = contentView.fittingSize
+            popover.contentSize = NSSize(width: 280, height: min(max(fittingSize.height, 180), 480))
+        }
+
+        if !popover.isShown {
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        popover.contentViewController?.view.window?.makeKey()
     }
 
     @objc private func togglePopover(_ sender: AnyObject?) {
         if popover.isShown {
             popover.performClose(sender)
-        } else if let button = statusItem.button {
-            if let contentView = popover.contentViewController?.view {
-                let fittingSize = contentView.fittingSize
-                popover.contentSize = NSSize(width: 280, height: min(max(fittingSize.height, 180), 420))
-            }
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            // Ensure the popover's window becomes key so clicks work
-            popover.contentViewController?.view.window?.makeKey()
+        } else {
+            showPopover()
         }
     }
 }

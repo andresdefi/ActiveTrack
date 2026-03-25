@@ -9,6 +9,8 @@ final class TimerServiceTests: XCTestCase {
     private var context: ModelContext!
     private var persistence: PersistenceService!
     private var timer: TimerService!
+    private var defaultsSuiteName: String!
+    private var defaults: UserDefaults!
 
     override func setUp() {
         super.setUp()
@@ -16,7 +18,10 @@ final class TimerServiceTests: XCTestCase {
         container = try! ModelContainer(for: ActiveInterval.self, configurations: config)
         context = container.mainContext
         persistence = PersistenceService(modelContext: context)
-        timer = TimerService()
+        defaultsSuiteName = "ActiveTrackTests.\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: defaultsSuiteName)
+        defaults.removePersistentDomain(forName: defaultsSuiteName)
+        timer = makeTimer()
         timer.configure(persistenceService: persistence)
     }
 
@@ -25,7 +30,36 @@ final class TimerServiceTests: XCTestCase {
         persistence = nil
         context = nil
         container = nil
+        defaults.removePersistentDomain(forName: defaultsSuiteName)
+        defaults = nil
+        defaultsSuiteName = nil
         super.tearDown()
+    }
+
+    private func makeTimer() -> TimerService {
+        TimerService(userDefaults: defaults)
+    }
+
+    private func waitFor(_ duration: TimeInterval) {
+        let expectation = expectation(description: "wait \(duration)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: duration + 1)
+    }
+
+    private func statusChangeNotificationCount(during action: () -> Void) -> Int {
+        var count = 0
+        let observer = NotificationCenter.default.addObserver(
+            forName: .activeTrackTimerStatusChanged,
+            object: nil,
+            queue: nil
+        ) { _ in
+            count += 1
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        action()
+        return count
     }
 
     // MARK: - Basic State
@@ -72,7 +106,7 @@ final class TimerServiceTests: XCTestCase {
         context.insert(interval)
         try! context.save()
 
-        let newTimer = TimerService(); newTimer.configure(persistenceService: persistence)
+        let newTimer = makeTimer(); newTimer.configure(persistenceService: persistence)
         XCTAssertTrue(newTimer.isRunning)
         XCTAssertGreaterThan(newTimer.currentIntervalElapsed, 50)
     }
@@ -88,6 +122,24 @@ final class TimerServiceTests: XCTestCase {
     func testPauseWhenNotRunningIgnored() {
         timer.pause()
         XCTAssertFalse(timer.isRunning)
+    }
+
+    func testStartPostsStatusChangeNotification() {
+        let count = statusChangeNotificationCount {
+            timer.start()
+        }
+
+        XCTAssertEqual(count, 1)
+    }
+
+    func testPausePostsStatusChangeNotification() {
+        timer.start()
+
+        let count = statusChangeNotificationCount {
+            timer.pause()
+        }
+
+        XCTAssertEqual(count, 1)
     }
 
     // MARK: - Error State
@@ -127,7 +179,7 @@ final class TimerServiceTests: XCTestCase {
         try! context.save()
 
         // Recovery triggers immediate rollover for previous-day intervals
-        let newTimer = TimerService(); newTimer.configure(persistenceService: persistence)
+        let newTimer = makeTimer(); newTimer.configure(persistenceService: persistence)
 
         // Should still be running with a new interval for today
         XCTAssertTrue(newTimer.isRunning)
@@ -151,7 +203,7 @@ final class TimerServiceTests: XCTestCase {
         context.insert(interval)
         try! context.save()
 
-        let newTimer = TimerService(); newTimer.configure(persistenceService: persistence)
+        let newTimer = makeTimer(); newTimer.configure(persistenceService: persistence)
 
         // The old interval should be closed with endDate at start of today (midnight)
         let todayStart = calendar.startOfDay(for: .now)
@@ -170,7 +222,7 @@ final class TimerServiceTests: XCTestCase {
         context.insert(interval)
         try! context.save()
 
-        let t = TimerService(); t.configure(persistenceService: persistence)
+        let t = makeTimer(); t.configure(persistenceService: persistence)
 
         // Yesterday should have 2 hours (22:00 -> 00:00)
         let yesterdayDuration = persistence.durationForDay(yesterdayStart)
@@ -186,7 +238,7 @@ final class TimerServiceTests: XCTestCase {
         context.insert(interval)
         try! context.save()
 
-        let newTimer = TimerService(); newTimer.configure(persistenceService: persistence)
+        let newTimer = makeTimer(); newTimer.configure(persistenceService: persistence)
 
         // todayTotal should be 0 (no completed intervals for today yet)
         XCTAssertEqual(newTimer.todayTotal, 0, accuracy: 1)
@@ -218,7 +270,7 @@ final class TimerServiceTests: XCTestCase {
         context.insert(interval)
         try! context.save()
 
-        let newTimer = TimerService(); newTimer.configure(persistenceService: persistence)
+        let newTimer = makeTimer(); newTimer.configure(persistenceService: persistence)
 
         // Should recover and roll over even with a multi-day gap
         XCTAssertTrue(newTimer.isRunning)
@@ -245,7 +297,7 @@ final class TimerServiceTests: XCTestCase {
         context.insert(interval)
         try! context.save()
 
-        let t = TimerService(); t.configure(persistenceService: persistence)
+        let t = makeTimer(); t.configure(persistenceService: persistence)
 
         // Each intermediate day should have data
         let twoDaysAgo = calendar.date(byAdding: .day, value: -2, to: calendar.startOfDay(for: .now))!
@@ -349,7 +401,7 @@ final class TimerServiceTests: XCTestCase {
         context.insert(interval)
         try! context.save()
 
-        let newTimer = TimerService(); newTimer.configure(persistenceService: persistence)
+        let newTimer = makeTimer(); newTimer.configure(persistenceService: persistence)
 
         // The old interval should be closed at midnight
         let all = persistence.fetchAllIntervals()
@@ -396,6 +448,22 @@ final class TimerServiceTests: XCTestCase {
         timer.handleWake()
         XCTAssertEqual(timer.todayTotal, totalBefore, accuracy: 1,
                        "Wake should preserve todayTotal for completed intervals")
+    }
+
+    func testWakePostsStatusChangeNotification() {
+        let count = statusChangeNotificationCount {
+            timer.handleWake()
+        }
+
+        XCTAssertEqual(count, 1)
+    }
+
+    func testMidnightRolloverPostsStatusChangeNotificationWhenPaused() {
+        let count = statusChangeNotificationCount {
+            timer.handleMidnightRollover()
+        }
+
+        XCTAssertEqual(count, 1)
     }
 
     func testSleepWakeCyclePreservesCompletedIntervals() {
@@ -584,7 +652,7 @@ final class TimerServiceTests: XCTestCase {
         context.insert(interval)
         try! context.save()
 
-        let newTimer = TimerService(); newTimer.configure(persistenceService: persistence)
+        let newTimer = makeTimer(); newTimer.configure(persistenceService: persistence)
 
         // Should recover without rollover
         XCTAssertTrue(newTimer.isRunning)
@@ -611,7 +679,7 @@ final class TimerServiceTests: XCTestCase {
         context.insert(interval)
         try! context.save()
 
-        let newTimer = TimerService(); newTimer.configure(persistenceService: persistence)
+        let newTimer = makeTimer(); newTimer.configure(persistenceService: persistence)
 
         XCTAssertFalse(newTimer.isRunning, "Should not be running when all intervals are closed")
         XCTAssertEqual(newTimer.currentIntervalElapsed, 0)
@@ -686,7 +754,7 @@ final class TimerServiceTests: XCTestCase {
         context.insert(recentInterval)
         try! context.save()
 
-        let newTimer = TimerService(); newTimer.configure(persistenceService: persistence)
+        let newTimer = makeTimer(); newTimer.configure(persistenceService: persistence)
 
         // Should be running with the most recent interval's elapsed time (~10 min, not ~24h)
         XCTAssertTrue(newTimer.isRunning)
@@ -715,13 +783,141 @@ final class TimerServiceTests: XCTestCase {
         context.insert(i3)
         try! context.save()
 
-        let newTimer = TimerService(); newTimer.configure(persistenceService: persistence)
+        let newTimer = makeTimer(); newTimer.configure(persistenceService: persistence)
 
         // todayTotal should include the 2 completed intervals (2h = 7200s)
         XCTAssertEqual(newTimer.todayTotal, 7200, accuracy: 5)
 
         // displayTime should be todayTotal + current elapsed (~30 min)
         XCTAssertEqual(newTimer.displayTime, 7200 + 1800, accuracy: 10)
+    }
+
+    // MARK: - Target Timer
+
+    func testFromNowTargetUsesCurrentBaselineAndAutoPauses() {
+        timer.start()
+        waitFor(0.3)
+        timer.tick()
+
+        let baseline = timer.displayTime
+        timer.setTarget(duration: 0.8, mode: .fromNow)
+
+        XCTAssertTrue(timer.isTargetActive)
+        XCTAssertEqual(timer.targetBaseline, baseline, accuracy: 0.2)
+
+        waitFor(0.4)
+        timer.tick()
+        XCTAssertTrue(timer.isRunning, "Target should not trigger before the selected duration has elapsed")
+
+        waitFor(0.5)
+        timer.tick()
+
+        XCTAssertFalse(timer.isRunning, "Timer should auto-pause once the from-now target is reached")
+        XCTAssertFalse(timer.isTargetActive)
+        XCTAssertTrue(timer.hasReachedTarget)
+        XCTAssertEqual(timer.reachedTargetMode, .fromNow)
+    }
+
+    func testTodayTotalTargetCountsPreviouslyLoggedTime() throws {
+        let completedEnd = Date.now.addingTimeInterval(-0.4)
+        let completedStart = completedEnd.addingTimeInterval(-0.8)
+        guard Calendar.current.isDateInToday(completedStart) else { return }
+
+        context.insert(ActiveInterval(startDate: completedStart, endDate: completedEnd))
+        try context.save()
+        timer.refreshTodayTotal()
+
+        XCTAssertGreaterThan(timer.todayTotal, 0.5)
+
+        timer.start()
+        timer.setTarget(duration: timer.todayTotal + 0.6, mode: .todayTotal)
+        XCTAssertEqual(timer.targetBaseline, 0, accuracy: 0.01)
+
+        waitFor(0.7)
+        timer.tick()
+
+        XCTAssertFalse(timer.isRunning)
+        XCTAssertTrue(timer.hasReachedTarget)
+        XCTAssertEqual(timer.reachedTargetMode, .todayTotal)
+    }
+
+    func testTargetReachedPostsNotificationAndResumeDoesNotRetrigger() {
+        var notificationCount = 0
+        let observer = NotificationCenter.default.addObserver(
+            forName: .activeTrackTargetReached,
+            object: nil,
+            queue: .main
+        ) { _ in
+            notificationCount += 1
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        timer.start()
+        timer.setTarget(duration: 0.5, mode: .fromNow)
+
+        waitFor(0.6)
+        timer.tick()
+
+        XCTAssertEqual(notificationCount, 1)
+        XCTAssertTrue(timer.hasReachedTarget)
+
+        timer.start()
+        XCTAssertFalse(timer.hasReachedTarget, "Starting again should dismiss the reached state")
+
+        waitFor(0.7)
+        timer.tick()
+
+        XCTAssertTrue(timer.isRunning, "Continuing after a reached target should not immediately retrigger")
+        XCTAssertEqual(notificationCount, 1)
+        timer.pause()
+    }
+
+    func testSleepDoesNotFalselyReachTarget() {
+        timer.start()
+        timer.setTarget(duration: 1.5, mode: .fromNow)
+
+        waitFor(0.4)
+        timer.tick()
+        timer.handleSleep()
+
+        XCTAssertFalse(timer.isRunning)
+        XCTAssertTrue(timer.isTargetActive, "A sleep pause should preserve the active target")
+        XCTAssertFalse(timer.hasReachedTarget)
+
+        timer.handleWake()
+        timer.start()
+
+        waitFor(1.2)
+        timer.tick()
+
+        XCTAssertFalse(timer.isRunning)
+        XCTAssertTrue(timer.hasReachedTarget)
+    }
+
+    func testTargetStateRestoresAcrossRecreatedService() {
+        timer.setTarget(duration: 5400, mode: .todayTotal)
+
+        let restoredTimer = makeTimer()
+        restoredTimer.configure(persistenceService: persistence)
+
+        XCTAssertTrue(restoredTimer.isTargetActive)
+        XCTAssertEqual(restoredTimer.targetDuration ?? 0, 5400, accuracy: 0.1)
+        XCTAssertEqual(restoredTimer.targetMode, .todayTotal)
+        XCTAssertEqual(restoredTimer.targetBaseline, 0, accuracy: 0.01)
+    }
+
+    func testResetTodayPostsStatusChangeNotification() {
+        timer.start()
+        waitFor(0.3)
+        timer.tick()
+        timer.pause()
+
+        let count = statusChangeNotificationCount {
+            timer.resetToday()
+        }
+
+        XCTAssertEqual(count, 1)
+        XCTAssertEqual(timer.todayTotal, 0, accuracy: 1)
     }
 
     // MARK: - v1.2.1 Regressions
@@ -737,7 +933,7 @@ final class TimerServiceTests: XCTestCase {
         let container = try ModelContainer(for: ActiveInterval.self, configurations: config)
         let persistence = PersistenceService(modelContext: container.mainContext, storeURL: storeURL)
 
-        let t1 = TimerService()
+        let t1 = makeTimer()
         t1.configure(persistenceService: persistence)
         t1.start()
 
@@ -749,7 +945,7 @@ final class TimerServiceTests: XCTestCase {
         let persistedBefore = t1.todayTotal
         XCTAssertGreaterThan(persistedBefore, 0)
 
-        let t2 = TimerService()
+        let t2 = makeTimer()
         t2.configure(persistenceService: persistence)
         XCTAssertEqual(t2.todayTotal, persistedBefore, accuracy: 2)
     }

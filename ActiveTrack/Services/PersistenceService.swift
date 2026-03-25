@@ -2,6 +2,8 @@ import Foundation
 import SwiftData
 import SQLite3
 
+private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
 enum PersistenceError: Error, Equatable {
     case saveFailed(underlying: String)
 
@@ -31,12 +33,24 @@ struct MonthlyTotal: Identifiable {
     var id: Date { monthStart }
 }
 
+struct HistoryChartData {
+    let daily: [DailyTotal]
+    let weekly: [WeeklyTotal]
+    let monthly: [MonthlyTotal]
+}
+
 @MainActor
 @Observable
 final class PersistenceService {
+    private enum MetadataKey {
+        static let daySummaryVersion = "day_summary_version"
+        static let currentDaySummaryVersion = "1"
+    }
+
     private let modelContext: ModelContext
     private let databaseURL: URL?
     private(set) var startupWarning: String?
+    private var cachedDaySummaryDurations: [Date: TimeInterval]?
 
     init(modelContext: ModelContext, storeURL: URL? = nil) {
         self.modelContext = modelContext
@@ -92,24 +106,22 @@ final class PersistenceService {
 
         do {
             try withWritableStore { db in
+                guard let openRecord = try readMostRecentOpenIntervalRecord(db: db) else { return }
                 _ = try executeUpdate(
                     db: db,
                     sql: """
                     UPDATE ZACTIVEINTERVAL
                     SET ZENDDATE = ?1, Z_OPT = Z_OPT + 1
-                    WHERE Z_PK = (
-                        SELECT Z_PK
-                        FROM ZACTIVEINTERVAL
-                        WHERE ZENDDATE IS NULL
-                        ORDER BY ZSTARTDATE DESC
-                        LIMIT 1
-                    )
+                    WHERE Z_PK = ?2
                     """,
                     bind: { statement in
                         sqlite3_bind_double(statement, 1, endDate.timeIntervalSinceReferenceDate)
+                        sqlite3_bind_int64(statement, 2, openRecord.primaryKey)
                     }
                 )
+                try applyDaySummaryDelta(startDate: openRecord.startDate, endDate: endDate, multiplier: 1, db: db)
             }
+            invalidateDaySummaryCache()
         } catch {
             throw PersistenceError.saveFailed(underlying: String(describing: error))
         }
@@ -128,24 +140,23 @@ final class PersistenceService {
 
         do {
             try withWritableStore { db in
+                guard let intervalRecord = try readIntervalRecord(db: db, matchingStartDate: interval.startDate) else { return }
                 _ = try executeUpdate(
                     db: db,
                     sql: """
                     DELETE FROM ZACTIVEINTERVAL
-                    WHERE Z_PK = (
-                        SELECT Z_PK
-                        FROM ZACTIVEINTERVAL
-                        WHERE ABS(ZSTARTDATE - ?1) < 0.001
-                        ORDER BY Z_PK DESC
-                        LIMIT 1
-                    )
+                    WHERE Z_PK = ?1
                     """,
                     bind: { statement in
-                        sqlite3_bind_double(statement, 1, interval.startDate.timeIntervalSinceReferenceDate)
+                        sqlite3_bind_int64(statement, 1, intervalRecord.primaryKey)
                     }
                 )
+                if let endDate = intervalRecord.endDate {
+                    try applyDaySummaryDelta(startDate: intervalRecord.startDate, endDate: endDate, multiplier: -1, db: db)
+                }
                 try syncPrimaryKey(db: db)
             }
+            invalidateDaySummaryCache()
         } catch {
             throw PersistenceError.saveFailed(underlying: String(describing: error))
         }
@@ -200,8 +211,19 @@ final class PersistenceService {
                         sqlite3_bind_double(statement, 2, dayEnd.timeIntervalSinceReferenceDate)
                     }
                 )
+                _ = try executeUpdate(
+                    db: db,
+                    sql: """
+                    DELETE FROM AT_DAY_SUMMARY
+                    WHERE ZDAYSTART = ?1
+                    """,
+                    bind: { statement in
+                        sqlite3_bind_double(statement, 1, dayStart.timeIntervalSinceReferenceDate)
+                    }
+                )
                 try syncPrimaryKey(db: db)
             }
+            invalidateDaySummaryCache()
         } catch {
             throw PersistenceError.saveFailed(underlying: String(describing: error))
         }
@@ -212,8 +234,7 @@ final class PersistenceService {
             return fetchAllIntervals().first(where: { $0.endDate == nil })
         }
 
-        let snapshots = fetchAllSnapshots()
-        guard let open = snapshots.last(where: { $0.endDate == nil }) else { return nil }
+        guard let open = readMostRecentOpenSnapshot() else { return nil }
         return ActiveInterval(startDate: open.startDate, endDate: nil)
     }
 
@@ -237,6 +258,13 @@ final class PersistenceService {
         let dayStart = calendar.startOfDay(for: date)
         let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart)!
 
+        if databaseURL != nil {
+            let completed = completedDayDurations(rangeStart: dayStart, rangeEnd: dayEnd)[dayStart] ?? 0
+            guard !completedOnly else { return completed }
+            guard let openSnapshot = readMostRecentOpenSnapshot() else { return completed }
+            return completed + clampedDuration(of: openSnapshot, dayStart: dayStart, dayEnd: dayEnd)
+        }
+
         let snapshots = fetchSnapshotsOverlapping(start: dayStart, end: dayEnd)
         return snapshots.reduce(0) { total, snapshot in
             if completedOnly, snapshot.endDate == nil { return total }
@@ -252,16 +280,8 @@ final class PersistenceService {
               let rangeEnd = calendar.date(byAdding: .day, value: 1, to: today) else {
             return []
         }
-        let snapshots = fetchSnapshotsOverlapping(start: firstDay, end: rangeEnd)
-
-        return (0..<days).compactMap { offset in
-            guard let dayStart = calendar.date(byAdding: .day, value: offset, to: firstDay),
-                  let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else {
-                return nil
-            }
-            let duration = durationForRange(start: dayStart, end: dayEnd, snapshots: snapshots)
-            return DailyTotal(date: dayStart, duration: duration)
-        }
+        let dayDurations = completedDayDurations(rangeStart: firstDay, rangeEnd: rangeEnd)
+        return buildDailyTotals(days: days, dayDurations: dayDurations, calendar: calendar)
     }
 
     func weeklyTotals(weeks: Int = 12) -> [WeeklyTotal] {
@@ -273,16 +293,8 @@ final class PersistenceService {
               let rangeEnd = calendar.date(byAdding: .day, value: 7, to: currentWeekStart) else {
             return []
         }
-        let snapshots = fetchSnapshotsOverlapping(start: firstWeekStart, end: rangeEnd)
-
-        return (0..<weeks).compactMap { offset in
-            guard let weekStart = calendar.date(byAdding: .weekOfYear, value: offset, to: firstWeekStart),
-                  let weekEnd = calendar.date(byAdding: .day, value: 7, to: weekStart) else {
-                return nil
-            }
-            let duration = durationForRange(start: weekStart, end: weekEnd, snapshots: snapshots)
-            return WeeklyTotal(weekStart: weekStart, duration: duration)
-        }
+        let dayDurations = completedDayDurations(rangeStart: firstWeekStart, rangeEnd: rangeEnd)
+        return buildWeeklyTotals(weeks: weeks, dayDurations: dayDurations, calendar: calendar)
     }
 
     func monthlyTotals(months: Int = 12) -> [MonthlyTotal] {
@@ -294,16 +306,8 @@ final class PersistenceService {
               let rangeEnd = calendar.date(byAdding: .month, value: 1, to: currentMonthStart) else {
             return []
         }
-        let snapshots = fetchSnapshotsOverlapping(start: firstMonthStart, end: rangeEnd)
-
-        return (0..<months).compactMap { offset in
-            guard let monthStart = calendar.date(byAdding: .month, value: offset, to: firstMonthStart),
-                  let monthEnd = calendar.date(byAdding: .month, value: 1, to: monthStart) else {
-                return nil
-            }
-            let duration = durationForRange(start: monthStart, end: monthEnd, snapshots: snapshots)
-            return MonthlyTotal(monthStart: monthStart, duration: duration)
-        }
+        let dayDurations = completedDayDurations(rangeStart: firstMonthStart, rangeEnd: rangeEnd)
+        return buildMonthlyTotals(months: months, dayDurations: dayDurations, calendar: calendar)
     }
 
     func intervalsForDay(_ date: Date) -> [(start: Date, end: Date, duration: TimeInterval)] {
@@ -322,12 +326,68 @@ final class PersistenceService {
     }
 
     func daysWithData() -> [Date] {
-        daysWithData(from: fetchAllSnapshots())
+        allDayDurations().keys.sorted(by: >)
+    }
+
+    func allDayDurations() -> [Date: TimeInterval] {
+        completedDayDurations()
+    }
+
+    func chartData(days: Int = 14, weeks: Int = 12, months: Int = 12) -> HistoryChartData {
+        let calendar = Calendar.current
+        var rangeStarts: [Date] = []
+        var rangeEnds: [Date] = []
+
+        if days > 0 {
+            let today = calendar.startOfDay(for: .now)
+            if let firstDay = calendar.date(byAdding: .day, value: -(days - 1), to: today),
+               let rangeEnd = calendar.date(byAdding: .day, value: 1, to: today) {
+                rangeStarts.append(firstDay)
+                rangeEnds.append(rangeEnd)
+            }
+        }
+
+        if weeks > 0 {
+            let todayComponents = calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: .now)
+            if let currentWeekStart = calendar.date(from: todayComponents),
+               let firstWeekStart = calendar.date(byAdding: .weekOfYear, value: -(weeks - 1), to: currentWeekStart),
+               let rangeEnd = calendar.date(byAdding: .day, value: 7, to: currentWeekStart) {
+                rangeStarts.append(firstWeekStart)
+                rangeEnds.append(rangeEnd)
+            }
+        }
+
+        if months > 0 {
+            let todayComponents = calendar.dateComponents([.year, .month], from: .now)
+            if let currentMonthStart = calendar.date(from: todayComponents),
+               let firstMonthStart = calendar.date(byAdding: .month, value: -(months - 1), to: currentMonthStart),
+               let rangeEnd = calendar.date(byAdding: .month, value: 1, to: currentMonthStart) {
+                rangeStarts.append(firstMonthStart)
+                rangeEnds.append(rangeEnd)
+            }
+        }
+
+        guard let rangeStart = rangeStarts.min(), let rangeEnd = rangeEnds.max() else {
+            return HistoryChartData(daily: [], weekly: [], monthly: [])
+        }
+
+        let dayDurations = completedDayDurations(rangeStart: rangeStart, rangeEnd: rangeEnd)
+        return HistoryChartData(
+            daily: buildDailyTotals(days: days, dayDurations: dayDurations, calendar: calendar),
+            weekly: buildWeeklyTotals(weeks: weeks, dayDurations: dayDurations, calendar: calendar),
+            monthly: buildMonthlyTotals(months: months, dayDurations: dayDurations, calendar: calendar)
+        )
     }
 
     // MARK: - Private Helpers
 
     private struct IntervalSnapshot {
+        let startDate: Date
+        let endDate: Date?
+    }
+
+    private struct IntervalRecord {
+        let primaryKey: Int64
         let startDate: Date
         let endDate: Date?
     }
@@ -350,6 +410,245 @@ final class PersistenceService {
         return fetchAllSnapshots().filter { snapshot in
             snapshot.startDate < end && (snapshot.endDate == nil || snapshot.endDate! > start)
         }
+    }
+
+    private func completedDayDurations(rangeStart: Date? = nil, rangeEnd: Date? = nil) -> [Date: TimeInterval] {
+        guard databaseURL != nil else {
+            let snapshots: [IntervalSnapshot]
+            if let rangeStart, let rangeEnd {
+                snapshots = fetchSnapshotsOverlapping(start: rangeStart, end: rangeEnd)
+            } else {
+                snapshots = fetchAllSnapshots()
+            }
+            return aggregatedDayDurations(from: snapshots.filter { $0.endDate != nil })
+        }
+
+        let summaries = loadCachedDaySummaryDurations()
+        guard let rangeStart, let rangeEnd else { return summaries }
+        return summaries.filter { dayStart, _ in
+            dayStart >= rangeStart && dayStart < rangeEnd
+        }
+    }
+
+    private func aggregatedDayDurations(rangeStart: Date? = nil, rangeEnd: Date? = nil) -> [Date: TimeInterval] {
+        let snapshots: [IntervalSnapshot]
+        if let rangeStart, let rangeEnd {
+            snapshots = fetchSnapshotsOverlapping(start: rangeStart, end: rangeEnd)
+        } else {
+            snapshots = fetchAllSnapshots()
+        }
+        return aggregatedDayDurations(from: snapshots)
+    }
+
+    private func aggregatedDayDurations(from snapshots: [IntervalSnapshot]) -> [Date: TimeInterval] {
+        let calendar = Calendar.current
+        var dayDurations: [Date: TimeInterval] = [:]
+
+        for snapshot in snapshots {
+            let start = snapshot.startDate
+            let end = snapshot.endDate ?? .now
+            guard end > start else { continue }
+
+            var dayStart = calendar.startOfDay(for: start)
+            while dayStart < end {
+                guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { break }
+                let duration = clampedDuration(of: snapshot, dayStart: dayStart, dayEnd: dayEnd)
+                if duration > 0 {
+                    dayDurations[dayStart, default: 0] += duration
+                }
+                dayStart = dayEnd
+            }
+        }
+
+        return dayDurations
+    }
+
+    private func loadCachedDaySummaryDurations() -> [Date: TimeInterval] {
+        if let cachedDaySummaryDurations {
+            return cachedDaySummaryDurations
+        }
+
+        let loaded = readDaySummaryDurations()
+        cachedDaySummaryDurations = loaded
+        return loaded
+    }
+
+    private func invalidateDaySummaryCache() {
+        cachedDaySummaryDurations = nil
+    }
+
+    private func readMostRecentOpenIntervalRecord(db: OpaquePointer?) throws -> IntervalRecord? {
+        try readIntervalRecord(
+            db: db,
+            sql: """
+            SELECT Z_PK, ZSTARTDATE, ZENDDATE
+            FROM ZACTIVEINTERVAL
+            WHERE ZENDDATE IS NULL
+            ORDER BY ZSTARTDATE DESC
+            LIMIT 1
+            """
+        ) { _ in }
+    }
+
+    private func readIntervalRecord(
+        db: OpaquePointer?,
+        matchingStartDate: Date
+    ) throws -> IntervalRecord? {
+        try readIntervalRecord(
+            db: db,
+            sql: """
+            SELECT Z_PK, ZSTARTDATE, ZENDDATE
+            FROM ZACTIVEINTERVAL
+            WHERE ABS(ZSTARTDATE - ?1) < 0.001
+            ORDER BY Z_PK DESC
+            LIMIT 1
+            """
+        ) { statement in
+            sqlite3_bind_double(statement, 1, matchingStartDate.timeIntervalSinceReferenceDate)
+        }
+    }
+
+    private func readIntervalRecord(
+        db: OpaquePointer?,
+        sql: String,
+        bind: (OpaquePointer?) -> Void
+    ) throws -> IntervalRecord? {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            if let statement { sqlite3_finalize(statement) }
+            throw SQLitePersistenceFailure.prepareFailed(sqliteMessage(db: db))
+        }
+        defer { sqlite3_finalize(statement) }
+
+        bind(statement)
+
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        guard sqlite3_column_type(statement, 1) != SQLITE_NULL else { return nil }
+
+        let primaryKey = sqlite3_column_int64(statement, 0)
+        let startDate = Date(timeIntervalSinceReferenceDate: sqlite3_column_double(statement, 1))
+        let endDate: Date?
+        if sqlite3_column_type(statement, 2) == SQLITE_NULL {
+            endDate = nil
+        } else {
+            endDate = Date(timeIntervalSinceReferenceDate: sqlite3_column_double(statement, 2))
+        }
+        return IntervalRecord(primaryKey: primaryKey, startDate: startDate, endDate: endDate)
+    }
+
+    private func applyDaySummaryDelta(
+        startDate: Date,
+        endDate: Date,
+        multiplier: Double,
+        db: OpaquePointer?
+    ) throws {
+        guard endDate > startDate else { return }
+
+        let calendar = Calendar.current
+        let snapshot = IntervalSnapshot(startDate: startDate, endDate: endDate)
+        var dayStart = calendar.startOfDay(for: startDate)
+
+        while dayStart < endDate {
+            guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { break }
+            let delta = clampedDuration(of: snapshot, dayStart: dayStart, dayEnd: dayEnd) * multiplier
+            if abs(delta) > 0.000_001 {
+                _ = try executeUpdate(
+                    db: db,
+                    sql: """
+                    INSERT INTO AT_DAY_SUMMARY (ZDAYSTART, ZCOMPLETEDDURATION)
+                    VALUES (?1, ?2)
+                    ON CONFLICT(ZDAYSTART) DO UPDATE
+                    SET ZCOMPLETEDDURATION = ZCOMPLETEDDURATION + excluded.ZCOMPLETEDDURATION
+                    """,
+                    bind: { statement in
+                        sqlite3_bind_double(statement, 1, dayStart.timeIntervalSinceReferenceDate)
+                        sqlite3_bind_double(statement, 2, delta)
+                    }
+                )
+                _ = try executeUpdate(
+                    db: db,
+                    sql: """
+                    DELETE FROM AT_DAY_SUMMARY
+                    WHERE ZDAYSTART = ?1
+                      AND ZCOMPLETEDDURATION <= 0.000001
+                    """,
+                    bind: { statement in
+                        sqlite3_bind_double(statement, 1, dayStart.timeIntervalSinceReferenceDate)
+                    }
+                )
+            }
+            dayStart = dayEnd
+        }
+    }
+
+    private func readMostRecentOpenSnapshot() -> IntervalSnapshot? {
+        guard let databaseURL else { return nil }
+        guard FileManager.default.fileExists(atPath: databaseURL.path) else { return nil }
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(databaseURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            if let db { sqlite3_close(db) }
+            return nil
+        }
+        defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 1000)
+
+        let snapshots = runSnapshotQuery(
+            db: db,
+            sql: """
+            SELECT ZSTARTDATE, ZENDDATE
+            FROM ZACTIVEINTERVAL
+            WHERE ZENDDATE IS NULL
+            ORDER BY ZSTARTDATE DESC
+            LIMIT 1
+            """,
+            bind: { _ in }
+        )
+        return snapshots.first
+    }
+
+    private func readDaySummaryDurations() -> [Date: TimeInterval] {
+        guard let databaseURL else { return [:] }
+        guard FileManager.default.fileExists(atPath: databaseURL.path) else { return [:] }
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(databaseURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            if let db { sqlite3_close(db) }
+            return [:]
+        }
+        defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 1000)
+
+        var statement: OpaquePointer?
+        let sql = """
+        SELECT ZDAYSTART, ZCOMPLETEDDURATION
+        FROM AT_DAY_SUMMARY
+        ORDER BY ZDAYSTART
+        """
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            if let statement { sqlite3_finalize(statement) }
+            return [:]
+        }
+        defer { sqlite3_finalize(statement) }
+
+        var summaries: [Date: TimeInterval] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let dayStart = Date(timeIntervalSinceReferenceDate: sqlite3_column_double(statement, 0))
+            let duration = sqlite3_column_double(statement, 1)
+            summaries[dayStart] = duration
+        }
+        return summaries
+    }
+
+    private func readClosedSnapshots(db: OpaquePointer?) -> [IntervalSnapshot] {
+        runSnapshotQuery(
+            db: db,
+            sql: """
+            SELECT ZSTARTDATE, ZENDDATE
+            FROM ZACTIVEINTERVAL
+            WHERE ZENDDATE IS NOT NULL
+            ORDER BY ZSTARTDATE
+            """,
+            bind: { _ in }
+        )
     }
 
     private func readSnapshots(rangeStart: Date?, rangeEnd: Date?) -> [IntervalSnapshot] {
@@ -462,6 +761,8 @@ final class PersistenceService {
                     )
                     warning = "Recovered \(openCount - 1) stale open sessions from a previous crash."
                 }
+
+                try ensureDaySummaryIsReady(db: db)
             }
         } catch {
             warning = "Store startup check failed. Tracking continues, but reliability may be reduced."
@@ -550,11 +851,89 @@ final class PersistenceService {
         return String(cString: cString)
     }
 
+    private func queryOptionalText(
+        db: OpaquePointer?,
+        sql: String,
+        bind: (OpaquePointer?) -> Void = { _ in }
+    ) throws -> String? {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            if let statement { sqlite3_finalize(statement) }
+            throw SQLitePersistenceFailure.prepareFailed(sqliteMessage(db: db))
+        }
+        defer { sqlite3_finalize(statement) }
+
+        bind(statement)
+
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        guard let cString = sqlite3_column_text(statement, 0) else { return nil }
+        return String(cString: cString)
+    }
+
     private func sqliteMessage(db: OpaquePointer?) -> String {
         guard let db, let cMessage = sqlite3_errmsg(db) else {
             return "Unknown sqlite error"
         }
         return String(cString: cMessage)
+    }
+
+    private func ensureDaySummaryIsReady(db: OpaquePointer?) throws {
+        let storedVersion = try queryOptionalText(
+            db: db,
+            sql: """
+            SELECT ZVALUE
+            FROM AT_METADATA
+            WHERE ZKEY = ?1
+            LIMIT 1
+            """,
+            bind: { statement in
+                sqlite3_bind_text(statement, 1, MetadataKey.daySummaryVersion, -1, sqliteTransient)
+            }
+        )
+        let summaryRowCount = try querySingleInt(db: db, sql: "SELECT COUNT(*) FROM AT_DAY_SUMMARY")
+        let closedIntervalCount = try querySingleInt(
+            db: db,
+            sql: "SELECT COUNT(*) FROM ZACTIVEINTERVAL WHERE ZENDDATE IS NOT NULL"
+        )
+
+        let needsRebuild = storedVersion != MetadataKey.currentDaySummaryVersion ||
+            (summaryRowCount == 0 && closedIntervalCount > 0)
+        guard needsRebuild else { return }
+
+        try rebuildDaySummary(db: db)
+        _ = try executeUpdate(
+            db: db,
+            sql: """
+            INSERT INTO AT_METADATA (ZKEY, ZVALUE)
+            VALUES (?1, ?2)
+            ON CONFLICT(ZKEY) DO UPDATE
+            SET ZVALUE = excluded.ZVALUE
+            """,
+            bind: { statement in
+                sqlite3_bind_text(statement, 1, MetadataKey.daySummaryVersion, -1, sqliteTransient)
+                sqlite3_bind_text(statement, 2, MetadataKey.currentDaySummaryVersion, -1, sqliteTransient)
+            }
+        )
+    }
+
+    private func rebuildDaySummary(db: OpaquePointer?) throws {
+        _ = try executeUpdate(db: db, sql: "DELETE FROM AT_DAY_SUMMARY")
+
+        let closedSnapshots = readClosedSnapshots(db: db)
+        let dayDurations = aggregatedDayDurations(from: closedSnapshots)
+        for (dayStart, duration) in dayDurations {
+            _ = try executeUpdate(
+                db: db,
+                sql: """
+                INSERT INTO AT_DAY_SUMMARY (ZDAYSTART, ZCOMPLETEDDURATION)
+                VALUES (?1, ?2)
+                """,
+                bind: { statement in
+                    sqlite3_bind_double(statement, 1, dayStart.timeIntervalSinceReferenceDate)
+                    sqlite3_bind_double(statement, 2, duration)
+                }
+            )
+        }
     }
 
     private func syncPrimaryKey(db: OpaquePointer?) throws {
@@ -580,6 +959,85 @@ final class PersistenceService {
         let effectiveStart = max(snapshot.startDate, dayStart)
         let effectiveEnd = min(snapshot.endDate ?? .now, dayEnd)
         return max(0, effectiveEnd.timeIntervalSince(effectiveStart))
+    }
+
+    private func buildDailyTotals(
+        days: Int,
+        dayDurations: [Date: TimeInterval],
+        calendar: Calendar
+    ) -> [DailyTotal] {
+        guard days > 0 else { return [] }
+        let today = calendar.startOfDay(for: .now)
+        guard let firstDay = calendar.date(byAdding: .day, value: -(days - 1), to: today) else { return [] }
+
+        return (0..<days).compactMap { offset in
+            guard let dayStart = calendar.date(byAdding: .day, value: offset, to: firstDay) else {
+                return nil
+            }
+            return DailyTotal(date: dayStart, duration: dayDurations[dayStart] ?? 0)
+        }
+    }
+
+    private func buildWeeklyTotals(
+        weeks: Int,
+        dayDurations: [Date: TimeInterval],
+        calendar: Calendar
+    ) -> [WeeklyTotal] {
+        guard weeks > 0 else { return [] }
+        let todayComponents = calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: .now)
+        guard let currentWeekStart = calendar.date(from: todayComponents),
+              let firstWeekStart = calendar.date(byAdding: .weekOfYear, value: -(weeks - 1), to: currentWeekStart) else {
+            return []
+        }
+
+        return (0..<weeks).compactMap { offset in
+            guard let weekStart = calendar.date(byAdding: .weekOfYear, value: offset, to: firstWeekStart),
+                  let weekEnd = calendar.date(byAdding: .day, value: 7, to: weekStart) else {
+                return nil
+            }
+            let duration = totalDuration(from: dayDurations, start: weekStart, end: weekEnd, calendar: calendar)
+            return WeeklyTotal(weekStart: weekStart, duration: duration)
+        }
+    }
+
+    private func buildMonthlyTotals(
+        months: Int,
+        dayDurations: [Date: TimeInterval],
+        calendar: Calendar
+    ) -> [MonthlyTotal] {
+        guard months > 0 else { return [] }
+        let todayComponents = calendar.dateComponents([.year, .month], from: .now)
+        guard let currentMonthStart = calendar.date(from: todayComponents),
+              let firstMonthStart = calendar.date(byAdding: .month, value: -(months - 1), to: currentMonthStart) else {
+            return []
+        }
+
+        return (0..<months).compactMap { offset in
+            guard let monthStart = calendar.date(byAdding: .month, value: offset, to: firstMonthStart),
+                  let monthEnd = calendar.date(byAdding: .month, value: 1, to: monthStart) else {
+                return nil
+            }
+            let duration = totalDuration(from: dayDurations, start: monthStart, end: monthEnd, calendar: calendar)
+            return MonthlyTotal(monthStart: monthStart, duration: duration)
+        }
+    }
+
+    private func totalDuration(
+        from dayDurations: [Date: TimeInterval],
+        start: Date,
+        end: Date,
+        calendar: Calendar
+    ) -> TimeInterval {
+        var total: TimeInterval = 0
+        var day = start
+
+        while day < end {
+            total += dayDurations[day] ?? 0
+            guard let nextDay = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+            day = nextDay
+        }
+
+        return total
     }
 
     private func daysWithData(from snapshots: [IntervalSnapshot]) -> [Date] {
@@ -635,16 +1093,46 @@ final class PersistenceService {
             VALUES (1, 'ActiveInterval', 0, 0)
             """
         )
+        _ = try executeUpdate(
+            db: db,
+            sql: """
+            CREATE TABLE IF NOT EXISTS AT_DAY_SUMMARY (
+                ZDAYSTART REAL PRIMARY KEY,
+                ZCOMPLETEDDURATION REAL NOT NULL
+            )
+            """
+        )
+        _ = try executeUpdate(
+            db: db,
+            sql: """
+            CREATE TABLE IF NOT EXISTS AT_METADATA (
+                ZKEY TEXT PRIMARY KEY,
+                ZVALUE TEXT NOT NULL
+            )
+            """
+        )
+        _ = try executeUpdate(
+            db: db,
+            sql: """
+            CREATE INDEX IF NOT EXISTS IDX_ACTIVEINTERVAL_STARTDATE
+            ON ZACTIVEINTERVAL (ZSTARTDATE)
+            """
+        )
+        _ = try executeUpdate(
+            db: db,
+            sql: """
+            CREATE INDEX IF NOT EXISTS IDX_ACTIVEINTERVAL_ENDDATE
+            ON ZACTIVEINTERVAL (ZENDDATE)
+            """
+        )
+        _ = try executeUpdate(
+            db: db,
+            sql: """
+            CREATE INDEX IF NOT EXISTS IDX_ACTIVEINTERVAL_OPEN_STARTDATE
+            ON ZACTIVEINTERVAL (ZSTARTDATE DESC)
+            WHERE ZENDDATE IS NULL
+            """
+        )
     }
 
-    private func durationForRange(
-        start: Date,
-        end: Date,
-        snapshots: [IntervalSnapshot]? = nil
-    ) -> TimeInterval {
-        let relevantSnapshots = snapshots ?? fetchSnapshotsOverlapping(start: start, end: end)
-        return relevantSnapshots.reduce(0) { total, snapshot in
-            total + clampedDuration(of: snapshot, dayStart: start, dayEnd: end)
-        }
-    }
 }
