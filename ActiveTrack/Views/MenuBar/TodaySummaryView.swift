@@ -9,7 +9,7 @@ struct TodaySummaryView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            Text(timerService.displayTime.formattedHoursMinutesSeconds)
+            Text(timerService.displayTime.formattedHoursMinutes)
                 .font(.system(.title, design: .monospaced, weight: .medium))
                 .contentTransition(.numericText())
 

@@ -216,17 +216,18 @@ final class TimerServiceTests: XCTestCase {
     func testRolloverPreservesYesterdayDuration() {
         let calendar = Calendar.current
         let yesterdayStart = calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: .now))!
-        let yesterdayEvening = calendar.date(byAdding: .hour, value: 22, to: yesterdayStart)!
+        let yesterdayEvening = calendar.date(bySettingHour: 22, minute: 0, second: 0, of: yesterdayStart)!
 
         let interval = ActiveInterval(startDate: yesterdayEvening)
         context.insert(interval)
         try! context.save()
 
         let t = makeTimer(); t.configure(persistenceService: persistence)
+        _ = t
 
-        // Yesterday should have 2 hours (22:00 -> 00:00)
         let yesterdayDuration = persistence.durationForDay(yesterdayStart)
-        XCTAssertEqual(yesterdayDuration, 7200, accuracy: 5)
+        let todayStart = calendar.startOfDay(for: .now)
+        XCTAssertEqual(yesterdayDuration, todayStart.timeIntervalSince(yesterdayEvening), accuracy: 5)
     }
 
     func testTodayTotalResetsAfterRollover() {
@@ -305,17 +306,18 @@ final class TimerServiceTests: XCTestCase {
 
         let twoDaysAgoDuration = persistence.durationForDay(twoDaysAgo)
         let yesterdayDuration = persistence.durationForDay(yesterday)
+        let twoDaysAgoEnd = calendar.date(byAdding: .day, value: 1, to: twoDaysAgo)!
+        let yesterdayEnd = calendar.date(byAdding: .day, value: 1, to: yesterday)!
 
-        // Each intermediate day should have a full 24h interval
-        XCTAssertEqual(twoDaysAgoDuration, 86400, accuracy: 5,
-                       "Two days ago should have a full day of tracked time from the gap")
-        XCTAssertEqual(yesterdayDuration, 86400, accuracy: 5,
-                       "Yesterday should have a full day of tracked time from the gap")
+        XCTAssertEqual(twoDaysAgoDuration, twoDaysAgoEnd.timeIntervalSince(twoDaysAgo), accuracy: 5,
+                       "Two days ago should have a full local calendar day of tracked time from the gap")
+        XCTAssertEqual(yesterdayDuration, yesterdayEnd.timeIntervalSince(yesterday), accuracy: 5,
+                       "Yesterday should have a full local calendar day of tracked time from the gap")
 
-        // Three days ago should have 9h (15:00 -> midnight)
         let threeDaysAgoDuration = persistence.durationForDay(threeDaysAgo)
-        XCTAssertEqual(threeDaysAgoDuration, 32400, accuracy: 5,
-                       "Three days ago should have 9h (15:00 -> midnight)")
+        let firstMidnight = calendar.date(byAdding: .day, value: 1, to: threeDaysAgo)!
+        XCTAssertEqual(threeDaysAgoDuration, firstMidnight.timeIntervalSince(start), accuracy: 5,
+                       "The original partial day should be tracked until its next local midnight")
     }
 
     // MARK: - Midnight Rollover Guard (the bug fix)
@@ -395,7 +397,7 @@ final class TimerServiceTests: XCTestCase {
         // Ensure the guard doesn't break legitimate cross-day rollover
         let calendar = Calendar.current
         let yesterdayStart = calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: .now))!
-        let yesterdayEvening = calendar.date(byAdding: .hour, value: 23, to: yesterdayStart)!
+        let yesterdayEvening = calendar.date(bySettingHour: 23, minute: 0, second: 0, of: yesterdayStart)!
 
         let interval = ActiveInterval(startDate: yesterdayEvening)
         context.insert(interval)

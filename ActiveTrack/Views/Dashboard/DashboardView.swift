@@ -33,7 +33,7 @@ struct DashboardView: View {
                     .foregroundStyle(.secondary)
                 Text("Timer persistence is active, and tracking continues from the menu bar.")
                     .foregroundStyle(.secondary)
-                Text("Current session: \(timerService.displayTime.formattedHoursMinutesSeconds)")
+                Text("Current session: \(timerService.displayTime.formattedHoursMinutes)")
                     .font(.system(.title3, design: .monospaced, weight: .medium))
                     .padding(.top, 6)
                 Spacer()
@@ -57,6 +57,10 @@ struct DashboardView: View {
             refreshDays()
         }
         .onChange(of: timerService.isRunning) {
+            refreshDays()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .activeTrackDisplayTimeChanged)) { _ in
+            guard timerService.isRunning else { return }
             refreshDays()
         }
         .onReceive(NotificationCenter.default.publisher(for: .activeTrackShowDashboardOverview)) { _ in
@@ -229,5 +233,6 @@ struct DashboardView: View {
 extension Notification.Name {
     static let activeTrackShowDashboardOverview = Notification.Name("ActiveTrackShowDashboardOverview")
     static let activeTrackTargetReached = Notification.Name("ActiveTrackTargetReached")
+    static let activeTrackDisplayTimeChanged = Notification.Name("ActiveTrackDisplayTimeChanged")
     static let activeTrackTimerStatusChanged = Notification.Name("ActiveTrackTimerStatusChanged")
 }

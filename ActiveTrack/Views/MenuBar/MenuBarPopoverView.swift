@@ -246,7 +246,7 @@ private struct TargetTimerView: View {
                 Text("Tracking \(targetDuration.formattedHoursMinutes) \(timerService.targetMode.summaryText)")
                     .font(.subheadline.weight(.semibold))
                 if let remainingTargetTime = timerService.remainingTargetTime {
-                    Text("Remaining: \(remainingTargetTime.formattedHoursMinutesSeconds)")
+                    Text("Remaining: \(remainingTargetTime.formattedHoursMinutes)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

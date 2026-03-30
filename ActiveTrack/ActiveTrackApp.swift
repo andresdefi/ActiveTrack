@@ -19,8 +19,8 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     private var statusItem: NSStatusItem
     private var popover: NSPopover
-    private var updateTimer: Timer?
     private var timerStatusObserver: Any?
+    private var displayTimeObserver: Any?
     private var targetReachedObserver: Any?
     private var hasRunThisDay = false
     private var trackedDayStart = Calendar.current.startOfDay(for: .now)
@@ -84,9 +84,11 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     deinit {
         MainActor.assumeIsolated {
-            stopUpdateTimer()
             if let timerStatusObserver {
                 NotificationCenter.default.removeObserver(timerStatusObserver)
+            }
+            if let displayTimeObserver {
+                NotificationCenter.default.removeObserver(displayTimeObserver)
             }
             if let targetReachedObserver {
                 NotificationCenter.default.removeObserver(targetReachedObserver)
@@ -94,41 +96,8 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
     }
 
-    private func startUpdateTimer() {
-        stopUpdateTimer()
-        let timer = Timer.scheduledTimer(withTimeInterval: secondsUntilNextStatusTitleChange(), repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { [weak self] in
-                guard let self else { return }
-                self.updateStatusItem()
-                if self.timerService.isRunning {
-                    self.startUpdateTimer()
-                }
-            }
-        }
-        RunLoop.current.add(timer, forMode: .common)
-        updateTimer = timer
-    }
-
-    private func stopUpdateTimer() {
-        updateTimer?.invalidate()
-        updateTimer = nil
-    }
-
     private func reconcileStatusUpdates() {
-        if timerService.isRunning {
-            startUpdateTimer()
-        } else {
-            stopUpdateTimer()
-        }
         updateStatusItem()
-    }
-
-    private func secondsUntilNextStatusTitleChange() -> TimeInterval {
-        let remainder = timerService.displayTime.truncatingRemainder(dividingBy: 60)
-        if remainder <= 0.001 {
-            return 60
-        }
-        return max(60 - remainder, 0.1)
     }
 
     private func observeTimerStatus() {
@@ -139,6 +108,16 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         ) { [weak self] _ in
             MainActor.assumeIsolated { [weak self] in
                 self?.reconcileStatusUpdates()
+            }
+        }
+
+        displayTimeObserver = NotificationCenter.default.addObserver(
+            forName: .activeTrackDisplayTimeChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { [weak self] in
+                self?.updateStatusItem()
             }
         }
     }

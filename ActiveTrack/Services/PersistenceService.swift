@@ -423,11 +423,10 @@ final class PersistenceService {
             return aggregatedDayDurations(from: snapshots.filter { $0.endDate != nil })
         }
 
-        let summaries = loadCachedDaySummaryDurations()
-        guard let rangeStart, let rangeEnd else { return summaries }
-        return summaries.filter { dayStart, _ in
-            dayStart >= rangeStart && dayStart < rangeEnd
+        guard let rangeStart, let rangeEnd else {
+            return loadCachedDaySummaryDurations()
         }
+        return readDaySummaryDurations(rangeStart: rangeStart, rangeEnd: rangeEnd)
     }
 
     private func aggregatedDayDurations(rangeStart: Date? = nil, rangeEnd: Date? = nil) -> [Date: TimeInterval] {
@@ -468,7 +467,7 @@ final class PersistenceService {
             return cachedDaySummaryDurations
         }
 
-        let loaded = readDaySummaryDurations()
+        let loaded = readAllDaySummaryDurations()
         cachedDaySummaryDurations = loaded
         return loaded
     }
@@ -606,7 +605,11 @@ final class PersistenceService {
         return snapshots.first
     }
 
-    private func readDaySummaryDurations() -> [Date: TimeInterval] {
+    private func readAllDaySummaryDurations() -> [Date: TimeInterval] {
+        readDaySummaryDurations(rangeStart: nil, rangeEnd: nil)
+    }
+
+    private func readDaySummaryDurations(rangeStart: Date?, rangeEnd: Date?) -> [Date: TimeInterval] {
         guard let databaseURL else { return [:] }
         guard FileManager.default.fileExists(atPath: databaseURL.path) else { return [:] }
         var db: OpaquePointer?
@@ -618,16 +621,32 @@ final class PersistenceService {
         sqlite3_busy_timeout(db, 1000)
 
         var statement: OpaquePointer?
-        let sql = """
-        SELECT ZDAYSTART, ZCOMPLETEDDURATION
-        FROM AT_DAY_SUMMARY
-        ORDER BY ZDAYSTART
-        """
+        let sql: String
+        if rangeStart != nil, rangeEnd != nil {
+            sql = """
+            SELECT ZDAYSTART, ZCOMPLETEDDURATION
+            FROM AT_DAY_SUMMARY
+            WHERE ZDAYSTART >= ?1
+              AND ZDAYSTART < ?2
+            ORDER BY ZDAYSTART
+            """
+        } else {
+            sql = """
+            SELECT ZDAYSTART, ZCOMPLETEDDURATION
+            FROM AT_DAY_SUMMARY
+            ORDER BY ZDAYSTART
+            """
+        }
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
             if let statement { sqlite3_finalize(statement) }
             return [:]
         }
         defer { sqlite3_finalize(statement) }
+
+        if let rangeStart, let rangeEnd {
+            sqlite3_bind_double(statement, 1, rangeStart.timeIntervalSinceReferenceDate)
+            sqlite3_bind_double(statement, 2, rangeEnd.timeIntervalSinceReferenceDate)
+        }
 
         var summaries: [Date: TimeInterval] = [:]
         while sqlite3_step(statement) == SQLITE_ROW {

@@ -30,6 +30,7 @@ enum TimerTargetMode: String, CaseIterable, Identifiable {
 
 enum HealthLog {
     private static let queue = DispatchQueue(label: "com.activetrack.healthlog")
+    nonisolated(unsafe) private static var fileHandle: FileHandle?
 
     static func event(_ name: String, metadata: [String: String] = [:]) {
         queue.async {
@@ -40,18 +41,13 @@ enum HealthLog {
                 .joined(separator: " ")
             let line = details.isEmpty ? "\(timestamp) \(name)\n" : "\(timestamp) \(name) \(details)\n"
 
-            let url = logFileURL()
-            if !FileManager.default.fileExists(atPath: url.path) {
-                FileManager.default.createFile(atPath: url.path, contents: nil)
-            }
-            guard let data = line.data(using: .utf8),
-                  let handle = try? FileHandle(forWritingTo: url) else { return }
-            defer { try? handle.close() }
+            guard let data = line.data(using: .utf8) else { return }
             do {
+                let handle = try openFileHandle()
                 try handle.seekToEnd()
                 try handle.write(contentsOf: data)
             } catch {
-                // Best-effort diagnostics only.
+                closeFileHandle()
             }
         }
     }
@@ -63,6 +59,27 @@ enum HealthLog {
             try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         }
         return directory.appendingPathComponent("health.log")
+    }
+
+    private static func openFileHandle() throws -> FileHandle {
+        if let fileHandle {
+            return fileHandle
+        }
+
+        let url = logFileURL()
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.seekToEnd()
+        fileHandle = handle
+        return handle
+    }
+
+    private static func closeFileHandle() {
+        try? fileHandle?.close()
+        fileHandle = nil
     }
 }
 
@@ -86,7 +103,6 @@ final class TimerService {
     private let userDefaults: UserDefaults
     private(set) var isRunning = false
     private(set) var todayTotal: TimeInterval = 0
-    private(set) var currentIntervalElapsed: TimeInterval = 0
     private(set) var lastError: PersistenceError?
     private(set) var targetDuration: TimeInterval?
     private(set) var targetMode: TimerTargetMode = .fromNow
@@ -94,9 +110,10 @@ final class TimerService {
     private(set) var reachedTargetDuration: TimeInterval?
     private(set) var reachedTargetMode: TimerTargetMode?
 
-    private var timer: Timer?
+    private var displayTimer: Timer?
     private var midnightTimer: Timer?
     private var targetTimer: Timer?
+    private var displayRefreshVersion = 0
     /// Cached start date of the current interval. Keep timer math on value
     /// types to avoid touching SwiftData model getters on tick callbacks.
     private var currentIntervalStartDate: Date?
@@ -105,6 +122,12 @@ final class TimerService {
     private var wakeObserver: Any?
     private var targetReferenceDay: Date?
     private var reachedTargetReferenceDay: Date?
+
+    var currentIntervalElapsed: TimeInterval {
+        _ = displayRefreshVersion
+        guard isRunning, let startDate = currentIntervalStartDate else { return 0 }
+        return max(Date.now.timeIntervalSince(startDate), 0)
+    }
 
     var displayTime: TimeInterval {
         todayTotal + currentIntervalElapsed
@@ -161,11 +184,12 @@ final class TimerService {
         normalizeTargetStateForCurrentDay()
         evaluateTargetIfNeeded()
         refreshTargetDeadline()
+        refreshDisplayUpdates()
     }
 
     deinit {
         MainActor.assumeIsolated {
-            timer?.invalidate()
+            displayTimer?.invalidate()
             midnightTimer?.invalidate()
             targetTimer?.invalidate()
             if let sleepObserver {
@@ -188,10 +212,10 @@ final class TimerService {
                 _ = try persistenceService.createInterval(startDate: startDate)
                 currentIntervalStartDate = startDate
                 isRunning = true
-                currentIntervalElapsed = 0
                 lastError = nil
-                startTicking()
+                refreshDisplayUpdates()
                 refreshTargetDeadline()
+                notifyDisplayTimeDidChange()
                 notifyStatusDidChange()
                 HealthLog.event("timer_start")
             } catch {
@@ -204,10 +228,10 @@ final class TimerService {
 
         currentIntervalStartDate = .now
         isRunning = true
-        currentIntervalElapsed = 0
         lastError = nil
-        startTicking()
+        refreshDisplayUpdates()
         refreshTargetDeadline()
+        notifyDisplayTimeDidChange()
         notifyStatusDidChange()
         HealthLog.event("timer_start_in_memory")
     }
@@ -221,11 +245,11 @@ final class TimerService {
                     try persistenceService.closeInterval(interval)
                 }
                 lastError = nil
-                stopTicking()
+                stopDisplayUpdates()
                 isRunning = false
                 currentIntervalStartDate = nil
-                currentIntervalElapsed = 0
                 refreshTodayTotal()
+                notifyDisplayTimeDidChange()
                 notifyStatusDidChange()
                 HealthLog.event("timer_pause")
             } catch {
@@ -237,13 +261,14 @@ final class TimerService {
             return
         }
 
-        stopTicking()
+        let elapsed = currentIntervalElapsed
+        stopDisplayUpdates()
         isRunning = false
-        todayTotal += currentIntervalElapsed
+        todayTotal += elapsed
         currentIntervalStartDate = nil
-        currentIntervalElapsed = 0
         lastError = nil
         refreshTargetDeadline()
+        notifyDisplayTimeDidChange()
         notifyStatusDidChange()
         HealthLog.event("timer_pause_in_memory")
     }
@@ -308,6 +333,7 @@ final class TimerService {
         reachedTargetMode = nil
         reachedTargetReferenceDay = nil
         persistReachedTargetState()
+        notifyDisplayTimeDidChange()
     }
 
     // MARK: - Private
@@ -345,6 +371,8 @@ final class TimerService {
         scheduleMidnightRollover()
         refreshTodayTotal()
         normalizeTargetStateForCurrentDay()
+        refreshDisplayUpdates()
+        notifyDisplayTimeDidChange()
         notifyStatusDidChange()
     }
 
@@ -355,9 +383,10 @@ final class TimerService {
 
         guard persistenceEnabled, let persistenceService else {
             todayTotal = 0
-            currentIntervalElapsed = 0
             currentIntervalStartDate = nil
+            stopDisplayUpdates()
             clearTarget()
+            notifyDisplayTimeDidChange()
             notifyStatusDidChange()
             HealthLog.event("reset_today_in_memory")
             return
@@ -366,10 +395,11 @@ final class TimerService {
         do {
             try persistenceService.resetToday()
             todayTotal = 0
-            currentIntervalElapsed = 0
             currentIntervalStartDate = nil
             lastError = nil
+            stopDisplayUpdates()
             clearTarget()
+            notifyDisplayTimeDidChange()
             notifyStatusDidChange()
             HealthLog.event("reset_today")
         } catch {
@@ -387,11 +417,10 @@ final class TimerService {
 
             isRunning = true
             currentIntervalStartDate = recoveredInterval.startDate
-            currentIntervalElapsed = Date.now.timeIntervalSince(recoveredInterval.startDate)
             lastError = nil
 
             if Calendar.current.isDateInToday(recoveredInterval.startDate) {
-                startTicking()
+                refreshDisplayUpdates()
                 HealthLog.event("recovered_open_interval")
             } else {
                 handleMidnightRollover()
@@ -404,25 +433,43 @@ final class TimerService {
         }
     }
 
-    private func startTicking() {
-        stopTicking()
-        let scheduled = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+    private func refreshDisplayUpdates() {
+        stopDisplayUpdates()
+        guard isRunning else { return }
+        let scheduled = Timer.scheduledTimer(withTimeInterval: secondsUntilNextDisplayChange(), repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { [weak self] in
-                self?.tick()
+                self?.handleDisplayTimerFired()
             }
         }
         RunLoop.current.add(scheduled, forMode: .common)
-        timer = scheduled
+        displayTimer = scheduled
     }
 
-    private func stopTicking() {
-        timer?.invalidate()
-        timer = nil
+    private func stopDisplayUpdates() {
+        displayTimer?.invalidate()
+        displayTimer = nil
+    }
+
+    private func secondsUntilNextDisplayChange() -> TimeInterval {
+        let remainder = displayTime.truncatingRemainder(dividingBy: 60)
+        if remainder <= 0.001 {
+            return 60
+        }
+        return max(60 - remainder, 0.1)
+    }
+
+    private func handleDisplayTimerFired() {
+        notifyDisplayTimeDidChange()
+        evaluateTargetIfNeeded()
+        if isRunning {
+            refreshDisplayUpdates()
+        }
     }
 
     // Internal for @testable access in tests
     func tick() {
-        refreshCurrentIntervalElapsed()
+        notifyDisplayTimeDidChange()
+        evaluateTargetIfNeeded()
     }
 
     private func scheduleMidnightRollover() {
@@ -449,12 +496,13 @@ final class TimerService {
                 let todayStart = calendar.startOfDay(for: .now)
                 todayTotal = 0
                 currentIntervalStartDate = todayStart
-                currentIntervalElapsed = Date.now.timeIntervalSince(todayStart)
             } else if !isRunning {
                 todayTotal = 0
             }
 
             scheduleMidnightRollover()
+            refreshDisplayUpdates()
+            notifyDisplayTimeDidChange()
             return
         }
 
@@ -495,7 +543,6 @@ final class TimerService {
                 let newInterval = try persistenceService.createInterval(startDate: todayStart)
                 _ = newInterval
                 currentIntervalStartDate = todayStart
-                currentIntervalElapsed = Date.now.timeIntervalSince(todayStart)
                 lastError = nil
             } catch {
                 logger.error("Failed during midnight rollover: \(error.localizedDescription)")
@@ -504,6 +551,8 @@ final class TimerService {
         }
 
         refreshTodayTotal()
+        refreshDisplayUpdates()
+        notifyDisplayTimeDidChange()
         scheduleMidnightRollover()
         notifyStatusDidChange()
     }
@@ -559,11 +608,6 @@ final class TimerService {
         NotificationCenter.default.post(name: .activeTrackTargetReached, object: nil)
     }
 
-    private func refreshCurrentIntervalElapsed() {
-        guard let startDate = currentIntervalStartDate else { return }
-        currentIntervalElapsed = Date.now.timeIntervalSince(startDate)
-    }
-
     private func refreshTargetDeadline() {
         targetTimer?.invalidate()
         targetTimer = nil
@@ -584,7 +628,7 @@ final class TimerService {
     private func handleTargetDeadlineReached() {
         targetTimer?.invalidate()
         targetTimer = nil
-        refreshCurrentIntervalElapsed()
+        notifyDisplayTimeDidChange()
         evaluateTargetIfNeeded()
 
         if isTargetActive {
@@ -670,6 +714,11 @@ final class TimerService {
             userDefaults.removeObject(forKey: DefaultsKey.reachedTargetMode)
             userDefaults.removeObject(forKey: DefaultsKey.reachedTargetReferenceDay)
         }
+    }
+
+    private func notifyDisplayTimeDidChange() {
+        displayRefreshVersion &+= 1
+        NotificationCenter.default.post(name: .activeTrackDisplayTimeChanged, object: nil)
     }
 
     private func notifyStatusDidChange() {
