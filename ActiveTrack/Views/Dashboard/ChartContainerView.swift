@@ -16,6 +16,9 @@ struct ChartContainerView: View {
     let persistenceService: PersistenceService
     @State private var selectedPeriod: ChartPeriod = .daily
     @State private var aggregateMetric: AggregateChartMetric = .total
+    @State private var persistedDailyData: [DailyTotal] = []
+    @State private var persistedWeeklyData: [WeeklyTotal] = []
+    @State private var persistedMonthlyData: [MonthlyTotal] = []
     @State private var dailyData: [DailyTotal] = []
     @State private var weeklyData: [WeeklyTotal] = []
     @State private var monthlyData: [MonthlyTotal] = []
@@ -71,15 +74,29 @@ struct ChartContainerView: View {
             }
         }
         .padding()
-        .onAppear { refreshData() }
-        .onChange(of: timerService.isRunning) { refreshData() }
+        .task { await reloadPersistedData() }
+        .onChange(of: timerService.isRunning) { applyRunningOverlay() }
+        .onReceive(NotificationCenter.default.publisher(for: .activeTrackDisplayTimeChanged)) { _ in
+            guard timerService.isRunning else { return }
+            applyRunningOverlay()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .activeTrackPersistenceDidChange)) { _ in
+            Task { await reloadPersistedData() }
+        }
     }
 
-    private func refreshData() {
-        let chartData = persistenceService.chartData(days: 14, weeks: 12, months: 12)
-        dailyData = chartData.daily
-        weeklyData = chartData.weekly
-        monthlyData = chartData.monthly
+    private func reloadPersistedData() async {
+        let chartData = await persistenceService.chartDataAsync(days: 14, weeks: 12, months: 12)
+        persistedDailyData = chartData.daily
+        persistedWeeklyData = chartData.weekly
+        persistedMonthlyData = chartData.monthly
+        applyRunningOverlay()
+    }
+
+    private func applyRunningOverlay() {
+        dailyData = persistedDailyData
+        weeklyData = persistedWeeklyData
+        monthlyData = persistedMonthlyData
 
         guard timerService.isRunning else { return }
         let runningElapsed = timerService.currentIntervalElapsed

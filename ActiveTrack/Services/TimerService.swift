@@ -561,9 +561,7 @@ final class TimerService {
     private func closeStaleOpenIntervals(keepingMostRecent: Bool) throws -> ActiveInterval? {
         guard let persistenceService else { return nil }
 
-        let openIntervals = persistenceService.fetchAllIntervals()
-            .filter { $0.endDate == nil }
-            .sorted { $0.startDate > $1.startDate }
+        let openIntervals = persistenceService.fetchOpenIntervals()
 
         guard let mostRecent = openIntervals.first else { return nil }
 

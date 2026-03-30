@@ -309,6 +309,19 @@ final class PersistenceServiceTests: XCTestCase {
                        "Should recover the most recent open interval, not a stale orphan")
     }
 
+    func testFetchOpenIntervalsReturnsNewestFirst() {
+        let olderInterval = ActiveInterval(startDate: Date.now.addingTimeInterval(-600))
+        let newerInterval = ActiveInterval(startDate: Date.now.addingTimeInterval(-60))
+        context.insert(olderInterval)
+        context.insert(newerInterval)
+        try! context.save()
+
+        let openIntervals = service.fetchOpenIntervals()
+        XCTAssertEqual(openIntervals.count, 2)
+        XCTAssertEqual(openIntervals.first?.startDate, newerInterval.startDate)
+        XCTAssertEqual(openIntervals.last?.startDate, olderInterval.startDate)
+    }
+
     // MARK: - Day Boundary Precision
 
     func testIntervalEndingExactlyAtMidnight() {
@@ -575,6 +588,11 @@ final class PersistenceServiceTests: XCTestCase {
         let durations = rebuiltService.allDayDurations()
         XCTAssertEqual(durations[yesterday] ?? 0, 7200, accuracy: 2)
         XCTAssertEqual(durations[today] ?? 0, 5400, accuracy: 2)
+
+        waitForCondition(timeout: 2.0) {
+            let rows = (try? self.readDaySummaryRows(at: storeURL)) ?? [:]
+            return (rows[yesterday] ?? 0) > 0 && (rows[today] ?? 0) > 0
+        }
     }
 
     private func makeSQLiteService() throws -> (PersistenceService, URL, URL) {
@@ -614,6 +632,24 @@ final class PersistenceServiceTests: XCTestCase {
                 throw XCTSkip("Failed to execute sqlite statement")
             }
         }
+    }
+
+    private func waitForCondition(
+        timeout: TimeInterval,
+        pollInterval: TimeInterval = 0.05,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: @escaping () -> Bool
+    ) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() {
+                return
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(pollInterval))
+        }
+
+        XCTAssertTrue(condition(), "Condition not met within \(timeout) seconds", file: file, line: line)
     }
 
     private func withDatabase(at storeURL: URL, _ body: (OpaquePointer?) throws -> Void) throws {

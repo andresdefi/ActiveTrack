@@ -10,7 +10,7 @@ struct DayDetailView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            LiveDayHeader(day: day, total: total, timerService: timerService)
+            LiveDayHeader(day: day, total: total)
                 .padding(.bottom, 8)
 
             if intervals.isEmpty {
@@ -38,13 +38,22 @@ struct DayDetailView: View {
             }
         }
         .padding()
-        .onAppear { refreshData() }
-        .onChange(of: day) { refreshData() }
-        .onChange(of: timerService.isRunning) { refreshData() }
+        .task(id: day) { await refreshData() }
+        .onChange(of: timerService.isRunning) {
+            guard Calendar.current.isDateInToday(day) else { return }
+            Task { await refreshData() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .activeTrackDisplayTimeChanged)) { _ in
+            guard timerService.isRunning, Calendar.current.isDateInToday(day) else { return }
+            Task { await refreshData() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .activeTrackPersistenceDidChange)) { _ in
+            Task { await refreshData() }
+        }
     }
 
-    private func refreshData() {
-        let dayIntervals = persistenceService.intervalsForDay(day)
+    private func refreshData() async {
+        let dayIntervals = await persistenceService.intervalsForDayAsync(day)
         intervals = dayIntervals
         total = dayIntervals.reduce(0) { $0 + $1.duration }
     }
@@ -53,25 +62,17 @@ struct DayDetailView: View {
 private struct LiveDayHeader: View {
     let day: Date
     let total: TimeInterval
-    let timerService: TimerService
 
     var body: some View {
         HStack {
             VStack(alignment: .leading) {
                 Text(day.shortDateString)
                     .font(.title2.bold())
-                Text("Total: \(displayTotal.formattedHoursMinutes)")
+                Text("Total: \(total.formattedHoursMinutes)")
                     .font(.title3)
                     .foregroundStyle(.secondary)
             }
             Spacer()
         }
-    }
-
-    private var displayTotal: TimeInterval {
-        if timerService.isRunning && Calendar.current.isDateInToday(day) {
-            return total + timerService.currentIntervalElapsed
-        }
-        return total
     }
 }

@@ -15,28 +15,276 @@ enum PersistenceError: Error, Equatable {
     }
 }
 
-struct DailyTotal: Identifiable {
+struct DailyTotal: Identifiable, Sendable {
     let date: Date
     let duration: TimeInterval
     var id: Date { date }
 }
 
-struct WeeklyTotal: Identifiable {
+struct WeeklyTotal: Identifiable, Sendable {
     let weekStart: Date
     let duration: TimeInterval
     var id: Date { weekStart }
 }
 
-struct MonthlyTotal: Identifiable {
+struct MonthlyTotal: Identifiable, Sendable {
     let monthStart: Date
     let duration: TimeInterval
     var id: Date { monthStart }
 }
 
-struct HistoryChartData {
+struct HistoryChartData: Sendable {
     let daily: [DailyTotal]
     let weekly: [WeeklyTotal]
     let monthly: [MonthlyTotal]
+}
+
+struct DayIntervalSummary: Sendable, Hashable {
+    let start: Date
+    let end: Date
+    let duration: TimeInterval
+}
+
+private struct IntervalSnapshot: Sendable {
+    let startDate: Date
+    let endDate: Date?
+}
+
+private struct IntervalRecord: Sendable {
+    let primaryKey: Int64
+    let startDate: Date
+    let endDate: Date?
+}
+
+private struct StartupCheckResult {
+    let warning: String?
+    let isDaySummaryReady: Bool
+}
+
+private func clampedDuration(of snapshot: IntervalSnapshot, dayStart: Date, dayEnd: Date) -> TimeInterval {
+    let effectiveStart = max(snapshot.startDate, dayStart)
+    let effectiveEnd = min(snapshot.endDate ?? .now, dayEnd)
+    return max(0, effectiveEnd.timeIntervalSince(effectiveStart))
+}
+
+private func aggregatedClosedDayDurations(from snapshots: [IntervalSnapshot]) -> [Date: TimeInterval] {
+    let calendar = Calendar.current
+    var dayDurations: [Date: TimeInterval] = [:]
+
+    for snapshot in snapshots where snapshot.endDate != nil {
+        let start = snapshot.startDate
+        let end = snapshot.endDate ?? .now
+        guard end > start else { continue }
+
+        var dayStart = calendar.startOfDay(for: start)
+        while dayStart < end {
+            guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { break }
+            let duration = clampedDuration(of: snapshot, dayStart: dayStart, dayEnd: dayEnd)
+            if duration > 0 {
+                dayDurations[dayStart, default: 0] += duration
+            }
+            dayStart = dayEnd
+        }
+    }
+
+    return dayDurations
+}
+
+private final class SQLiteReadConnection {
+    private let databaseURL: URL
+    private var db: OpaquePointer?
+
+    init(databaseURL: URL) {
+        self.databaseURL = databaseURL
+    }
+
+    deinit {
+        if let db {
+            sqlite3_close(db)
+        }
+    }
+
+    func readSnapshots(rangeStart: Date?, rangeEnd: Date?) -> [IntervalSnapshot] {
+        guard let db = ensureOpen() else { return [] }
+
+        let sql: String
+        if let rangeStart, let rangeEnd {
+            sql = """
+            SELECT ZSTARTDATE, ZENDDATE
+            FROM ZACTIVEINTERVAL
+            WHERE ZSTARTDATE < ?1
+              AND (ZENDDATE IS NULL OR ZENDDATE > ?2)
+            ORDER BY ZSTARTDATE
+            """
+            return runSnapshotQuery(
+                db: db,
+                sql: sql,
+                bind: { statement in
+                    sqlite3_bind_double(statement, 1, rangeEnd.timeIntervalSinceReferenceDate)
+                    sqlite3_bind_double(statement, 2, rangeStart.timeIntervalSinceReferenceDate)
+                }
+            )
+        }
+
+        sql = """
+        SELECT ZSTARTDATE, ZENDDATE
+        FROM ZACTIVEINTERVAL
+        ORDER BY ZSTARTDATE
+        """
+        return runSnapshotQuery(db: db, sql: sql, bind: { _ in })
+    }
+
+    func readOpenSnapshots() -> [IntervalSnapshot] {
+        guard let db = ensureOpen() else { return [] }
+        return runSnapshotQuery(
+            db: db,
+            sql: """
+            SELECT ZSTARTDATE, ZENDDATE
+            FROM ZACTIVEINTERVAL
+            WHERE ZENDDATE IS NULL
+            ORDER BY ZSTARTDATE DESC
+            """,
+            bind: { _ in }
+        )
+    }
+
+    func readMostRecentOpenSnapshot() -> IntervalSnapshot? {
+        guard let db = ensureOpen() else { return nil }
+        return runSnapshotQuery(
+            db: db,
+            sql: """
+            SELECT ZSTARTDATE, ZENDDATE
+            FROM ZACTIVEINTERVAL
+            WHERE ZENDDATE IS NULL
+            ORDER BY ZSTARTDATE DESC
+            LIMIT 1
+            """,
+            bind: { _ in }
+        ).first
+    }
+
+    func readDaySummaryDurations(rangeStart: Date?, rangeEnd: Date?) -> [Date: TimeInterval] {
+        guard let db = ensureOpen() else { return [:] }
+
+        var statement: OpaquePointer?
+        let sql: String
+        if rangeStart != nil, rangeEnd != nil {
+            sql = """
+            SELECT ZDAYSTART, ZCOMPLETEDDURATION
+            FROM AT_DAY_SUMMARY
+            WHERE ZDAYSTART >= ?1
+              AND ZDAYSTART < ?2
+            ORDER BY ZDAYSTART
+            """
+        } else {
+            sql = """
+            SELECT ZDAYSTART, ZCOMPLETEDDURATION
+            FROM AT_DAY_SUMMARY
+            ORDER BY ZDAYSTART
+            """
+        }
+
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            if let statement { sqlite3_finalize(statement) }
+            return [:]
+        }
+        defer { sqlite3_finalize(statement) }
+
+        if let rangeStart, let rangeEnd {
+            sqlite3_bind_double(statement, 1, rangeStart.timeIntervalSinceReferenceDate)
+            sqlite3_bind_double(statement, 2, rangeEnd.timeIntervalSinceReferenceDate)
+        }
+
+        var summaries: [Date: TimeInterval] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let dayStart = Date(timeIntervalSinceReferenceDate: sqlite3_column_double(statement, 0))
+            let duration = sqlite3_column_double(statement, 1)
+            summaries[dayStart] = duration
+        }
+        return summaries
+    }
+
+    private func ensureOpen() -> OpaquePointer? {
+        if let db {
+            return db
+        }
+        guard FileManager.default.fileExists(atPath: databaseURL.path) else { return nil }
+
+        var opened: OpaquePointer?
+        guard sqlite3_open_v2(databaseURL.path, &opened, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            if let opened { sqlite3_close(opened) }
+            return nil
+        }
+        sqlite3_busy_timeout(opened, 1000)
+        db = opened
+        return opened
+    }
+
+    private func runSnapshotQuery(
+        db: OpaquePointer?,
+        sql: String,
+        bind: (OpaquePointer?) -> Void
+    ) -> [IntervalSnapshot] {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            if let statement { sqlite3_finalize(statement) }
+            return []
+        }
+        defer { sqlite3_finalize(statement) }
+
+        bind(statement)
+
+        var snapshots: [IntervalSnapshot] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard sqlite3_column_type(statement, 0) != SQLITE_NULL else { continue }
+            let start = sqlite3_column_double(statement, 0)
+            let end: Date?
+            if sqlite3_column_type(statement, 1) == SQLITE_NULL {
+                end = nil
+            } else {
+                end = Date(timeIntervalSinceReferenceDate: sqlite3_column_double(statement, 1))
+            }
+            snapshots.append(
+                IntervalSnapshot(
+                    startDate: Date(timeIntervalSinceReferenceDate: start),
+                    endDate: end
+                )
+            )
+        }
+        return snapshots
+    }
+}
+
+private actor SQLiteAsyncReader {
+    private let connection: SQLiteReadConnection
+
+    init(databaseURL: URL) {
+        self.connection = SQLiteReadConnection(databaseURL: databaseURL)
+    }
+
+    func dayDurations(rangeStart: Date?, rangeEnd: Date?, summaryReady: Bool) -> [Date: TimeInterval] {
+        if summaryReady {
+            return connection.readDaySummaryDurations(rangeStart: rangeStart, rangeEnd: rangeEnd)
+        }
+
+        let snapshots = connection.readSnapshots(rangeStart: rangeStart, rangeEnd: rangeEnd)
+        return aggregatedClosedDayDurations(from: snapshots)
+    }
+
+    func intervalsForDay(_ date: Date) -> [DayIntervalSummary] {
+        let calendar = Calendar.current
+        let dayStart = calendar.startOfDay(for: date)
+        guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return [] }
+
+        let snapshots = connection.readSnapshots(rangeStart: dayStart, rangeEnd: dayEnd)
+        return snapshots.compactMap { snapshot in
+            let effectiveStart = max(snapshot.startDate, dayStart)
+            let effectiveEnd = min(snapshot.endDate ?? .now, dayEnd)
+            let duration = max(0, effectiveEnd.timeIntervalSince(effectiveStart))
+            guard duration > 0 else { return nil }
+            return DayIntervalSummary(start: effectiveStart, end: effectiveEnd, duration: duration)
+        }
+    }
 }
 
 @MainActor
@@ -49,13 +297,24 @@ final class PersistenceService {
 
     private let modelContext: ModelContext
     private let databaseURL: URL?
+    private let readConnection: SQLiteReadConnection?
+    private let asyncReader: SQLiteAsyncReader?
     private(set) var startupWarning: String?
     private var cachedDaySummaryDurations: [Date: TimeInterval]?
+    private var isDaySummaryReady = true
+    private var isPreparingDaySummary = false
 
     init(modelContext: ModelContext, storeURL: URL? = nil) {
         self.modelContext = modelContext
         self.databaseURL = storeURL
-        self.startupWarning = runStartupChecks()
+        self.readConnection = storeURL.map(SQLiteReadConnection.init(databaseURL:))
+        self.asyncReader = storeURL.map(SQLiteAsyncReader.init(databaseURL:))
+        let startupCheck = runStartupChecks()
+        self.startupWarning = startupCheck.warning
+        self.isDaySummaryReady = startupCheck.isDaySummaryReady
+        if storeURL != nil, !startupCheck.isDaySummaryReady {
+            scheduleDaySummaryPreparation()
+        }
     }
 
     // MARK: - CRUD
@@ -67,6 +326,7 @@ final class PersistenceService {
             modelContext.insert(interval)
             do {
                 try modelContext.save()
+                notifyPersistenceDidChange()
                 return interval
             } catch {
                 throw PersistenceError.saveFailed(underlying: error.localizedDescription)
@@ -87,6 +347,8 @@ final class PersistenceService {
                 )
                 try syncPrimaryKey(db: db)
             }
+            invalidateDaySummaryCache()
+            notifyPersistenceDidChange()
             return ActiveInterval(startDate: startDate)
         } catch {
             throw PersistenceError.saveFailed(underlying: String(describing: error))
@@ -98,6 +360,7 @@ final class PersistenceService {
             interval.endDate = endDate
             do {
                 try modelContext.save()
+                notifyPersistenceDidChange()
                 return
             } catch {
                 throw PersistenceError.saveFailed(underlying: error.localizedDescription)
@@ -122,6 +385,7 @@ final class PersistenceService {
                 try applyDaySummaryDelta(startDate: openRecord.startDate, endDate: endDate, multiplier: 1, db: db)
             }
             invalidateDaySummaryCache()
+            notifyPersistenceDidChange()
         } catch {
             throw PersistenceError.saveFailed(underlying: String(describing: error))
         }
@@ -132,6 +396,7 @@ final class PersistenceService {
             modelContext.delete(interval)
             do {
                 try modelContext.save()
+                notifyPersistenceDidChange()
                 return
             } catch {
                 throw PersistenceError.saveFailed(underlying: error.localizedDescription)
@@ -157,6 +422,7 @@ final class PersistenceService {
                 try syncPrimaryKey(db: db)
             }
             invalidateDaySummaryCache()
+            notifyPersistenceDidChange()
         } catch {
             throw PersistenceError.saveFailed(underlying: String(describing: error))
         }
@@ -179,6 +445,7 @@ final class PersistenceService {
             }
             do {
                 try modelContext.save()
+                notifyPersistenceDidChange()
                 return
             } catch {
                 throw PersistenceError.saveFailed(underlying: error.localizedDescription)
@@ -224,18 +491,25 @@ final class PersistenceService {
                 try syncPrimaryKey(db: db)
             }
             invalidateDaySummaryCache()
+            notifyPersistenceDidChange()
         } catch {
             throw PersistenceError.saveFailed(underlying: String(describing: error))
         }
     }
 
     func fetchOpenInterval() -> ActiveInterval? {
+        fetchOpenIntervals().first
+    }
+
+    func fetchOpenIntervals() -> [ActiveInterval] {
         guard databaseURL != nil else {
-            return fetchAllIntervals().first(where: { $0.endDate == nil })
+            return fetchAllIntervals()
+                .filter { $0.endDate == nil }
+                .sorted { $0.startDate > $1.startDate }
         }
 
-        guard let open = readMostRecentOpenSnapshot() else { return nil }
-        return ActiveInterval(startDate: open.startDate, endDate: nil)
+        let snapshots = readConnection?.readOpenSnapshots() ?? []
+        return snapshots.map { ActiveInterval(startDate: $0.startDate, endDate: nil) }
     }
 
     func fetchAllIntervals() -> [ActiveInterval] {
@@ -333,7 +607,67 @@ final class PersistenceService {
         completedDayDurations()
     }
 
+    func allDayDurationsAsync() async -> [Date: TimeInterval] {
+        await completedDayDurationsAsync()
+    }
+
     func chartData(days: Int = 14, weeks: Int = 12, months: Int = 12) -> HistoryChartData {
+        buildChartData(days: days, weeks: weeks, months: months) { rangeStart, rangeEnd in
+            completedDayDurations(rangeStart: rangeStart, rangeEnd: rangeEnd)
+        }
+    }
+
+    func chartDataAsync(days: Int = 14, weeks: Int = 12, months: Int = 12) async -> HistoryChartData {
+        let ranges = chartRanges(days: days, weeks: weeks, months: months)
+        guard let rangeStart = ranges.rangeStart, let rangeEnd = ranges.rangeEnd else {
+            return HistoryChartData(daily: [], weekly: [], monthly: [])
+        }
+
+        let calendar = Calendar.current
+        let dayDurations = await completedDayDurationsAsync(rangeStart: rangeStart, rangeEnd: rangeEnd)
+        return HistoryChartData(
+            daily: buildDailyTotals(days: days, dayDurations: dayDurations, calendar: calendar),
+            weekly: buildWeeklyTotals(weeks: weeks, dayDurations: dayDurations, calendar: calendar),
+            monthly: buildMonthlyTotals(months: months, dayDurations: dayDurations, calendar: calendar)
+        )
+    }
+
+    func intervalsForDayAsync(_ date: Date) async -> [(start: Date, end: Date, duration: TimeInterval)] {
+        guard databaseURL != nil else {
+            return intervalsForDay(date)
+        }
+
+        let intervals = await asyncReader?.intervalsForDay(date) ?? []
+        return intervals.map { (start: $0.start, end: $0.end, duration: $0.duration) }
+    }
+
+    // MARK: - Private Helpers
+
+    private func buildChartData(
+        days: Int,
+        weeks: Int,
+        months: Int,
+        loader: (Date, Date) -> [Date: TimeInterval]
+    ) -> HistoryChartData {
+        let ranges = chartRanges(days: days, weeks: weeks, months: months)
+        guard let rangeStart = ranges.rangeStart, let rangeEnd = ranges.rangeEnd else {
+            return HistoryChartData(daily: [], weekly: [], monthly: [])
+        }
+
+        let calendar = Calendar.current
+        let dayDurations = loader(rangeStart, rangeEnd)
+        return HistoryChartData(
+            daily: buildDailyTotals(days: days, dayDurations: dayDurations, calendar: calendar),
+            weekly: buildWeeklyTotals(weeks: weeks, dayDurations: dayDurations, calendar: calendar),
+            monthly: buildMonthlyTotals(months: months, dayDurations: dayDurations, calendar: calendar)
+        )
+    }
+
+    private func chartRanges(
+        days: Int,
+        weeks: Int,
+        months: Int
+    ) -> (rangeStart: Date?, rangeEnd: Date?) {
         let calendar = Calendar.current
         var rangeStarts: [Date] = []
         var rangeEnds: [Date] = []
@@ -367,34 +701,12 @@ final class PersistenceService {
             }
         }
 
-        guard let rangeStart = rangeStarts.min(), let rangeEnd = rangeEnds.max() else {
-            return HistoryChartData(daily: [], weekly: [], monthly: [])
-        }
-
-        let dayDurations = completedDayDurations(rangeStart: rangeStart, rangeEnd: rangeEnd)
-        return HistoryChartData(
-            daily: buildDailyTotals(days: days, dayDurations: dayDurations, calendar: calendar),
-            weekly: buildWeeklyTotals(weeks: weeks, dayDurations: dayDurations, calendar: calendar),
-            monthly: buildMonthlyTotals(months: months, dayDurations: dayDurations, calendar: calendar)
-        )
-    }
-
-    // MARK: - Private Helpers
-
-    private struct IntervalSnapshot {
-        let startDate: Date
-        let endDate: Date?
-    }
-
-    private struct IntervalRecord {
-        let primaryKey: Int64
-        let startDate: Date
-        let endDate: Date?
+        return (rangeStarts.min(), rangeEnds.max())
     }
 
     private func fetchAllSnapshots() -> [IntervalSnapshot] {
         if databaseURL != nil {
-            return readSnapshots(rangeStart: nil, rangeEnd: nil)
+            return readConnection?.readSnapshots(rangeStart: nil, rangeEnd: nil) ?? []
         }
 
         return fetchAllIntervals()
@@ -404,7 +716,7 @@ final class PersistenceService {
 
     private func fetchSnapshotsOverlapping(start: Date, end: Date) -> [IntervalSnapshot] {
         if databaseURL != nil {
-            return readSnapshots(rangeStart: start, rangeEnd: end)
+            return readConnection?.readSnapshots(rangeStart: start, rangeEnd: end) ?? []
         }
 
         return fetchAllSnapshots().filter { snapshot in
@@ -420,46 +732,36 @@ final class PersistenceService {
             } else {
                 snapshots = fetchAllSnapshots()
             }
-            return aggregatedDayDurations(from: snapshots.filter { $0.endDate != nil })
+            return aggregatedClosedDayDurations(from: snapshots)
         }
 
-        guard let rangeStart, let rangeEnd else {
-            return loadCachedDaySummaryDurations()
-        }
-        return readDaySummaryDurations(rangeStart: rangeStart, rangeEnd: rangeEnd)
-    }
-
-    private func aggregatedDayDurations(rangeStart: Date? = nil, rangeEnd: Date? = nil) -> [Date: TimeInterval] {
-        let snapshots: [IntervalSnapshot]
-        if let rangeStart, let rangeEnd {
-            snapshots = fetchSnapshotsOverlapping(start: rangeStart, end: rangeEnd)
-        } else {
-            snapshots = fetchAllSnapshots()
-        }
-        return aggregatedDayDurations(from: snapshots)
-    }
-
-    private func aggregatedDayDurations(from snapshots: [IntervalSnapshot]) -> [Date: TimeInterval] {
-        let calendar = Calendar.current
-        var dayDurations: [Date: TimeInterval] = [:]
-
-        for snapshot in snapshots {
-            let start = snapshot.startDate
-            let end = snapshot.endDate ?? .now
-            guard end > start else { continue }
-
-            var dayStart = calendar.startOfDay(for: start)
-            while dayStart < end {
-                guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { break }
-                let duration = clampedDuration(of: snapshot, dayStart: dayStart, dayEnd: dayEnd)
-                if duration > 0 {
-                    dayDurations[dayStart, default: 0] += duration
-                }
-                dayStart = dayEnd
+        if isDaySummaryReady {
+            guard let rangeStart, let rangeEnd else {
+                return loadCachedDaySummaryDurations()
             }
+            return readConnection?.readDaySummaryDurations(rangeStart: rangeStart, rangeEnd: rangeEnd) ?? [:]
         }
 
-        return dayDurations
+        if let rangeStart, let rangeEnd {
+            let snapshots = readConnection?.readSnapshots(rangeStart: rangeStart, rangeEnd: rangeEnd) ?? []
+            return aggregatedClosedDayDurations(from: snapshots)
+        }
+        return aggregatedClosedDayDurations(from: readConnection?.readSnapshots(rangeStart: nil, rangeEnd: nil) ?? [])
+    }
+
+    private func completedDayDurationsAsync(rangeStart: Date? = nil, rangeEnd: Date? = nil) async -> [Date: TimeInterval] {
+        guard databaseURL != nil else {
+            return completedDayDurations(rangeStart: rangeStart, rangeEnd: rangeEnd)
+        }
+
+        guard let asyncReader else {
+            return completedDayDurations(rangeStart: rangeStart, rangeEnd: rangeEnd)
+        }
+        return await asyncReader.dayDurations(
+            rangeStart: rangeStart,
+            rangeEnd: rangeEnd,
+            summaryReady: isDaySummaryReady
+        )
     }
 
     private func loadCachedDaySummaryDurations() -> [Date: TimeInterval] {
@@ -467,13 +769,17 @@ final class PersistenceService {
             return cachedDaySummaryDurations
         }
 
-        let loaded = readAllDaySummaryDurations()
+        let loaded = readConnection?.readDaySummaryDurations(rangeStart: nil, rangeEnd: nil) ?? [:]
         cachedDaySummaryDurations = loaded
         return loaded
     }
 
     private func invalidateDaySummaryCache() {
         cachedDaySummaryDurations = nil
+    }
+
+    private func notifyPersistenceDidChange() {
+        NotificationCenter.default.post(name: .activeTrackPersistenceDidChange, object: nil)
     }
 
     private func readMostRecentOpenIntervalRecord(db: OpaquePointer?) throws -> IntervalRecord? {
@@ -581,163 +887,29 @@ final class PersistenceService {
     }
 
     private func readMostRecentOpenSnapshot() -> IntervalSnapshot? {
-        guard let databaseURL else { return nil }
-        guard FileManager.default.fileExists(atPath: databaseURL.path) else { return nil }
-        var db: OpaquePointer?
-        guard sqlite3_open_v2(databaseURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
-            if let db { sqlite3_close(db) }
-            return nil
-        }
-        defer { sqlite3_close(db) }
-        sqlite3_busy_timeout(db, 1000)
-
-        let snapshots = runSnapshotQuery(
-            db: db,
-            sql: """
-            SELECT ZSTARTDATE, ZENDDATE
-            FROM ZACTIVEINTERVAL
-            WHERE ZENDDATE IS NULL
-            ORDER BY ZSTARTDATE DESC
-            LIMIT 1
-            """,
-            bind: { _ in }
-        )
-        return snapshots.first
-    }
-
-    private func readAllDaySummaryDurations() -> [Date: TimeInterval] {
-        readDaySummaryDurations(rangeStart: nil, rangeEnd: nil)
-    }
-
-    private func readDaySummaryDurations(rangeStart: Date?, rangeEnd: Date?) -> [Date: TimeInterval] {
-        guard let databaseURL else { return [:] }
-        guard FileManager.default.fileExists(atPath: databaseURL.path) else { return [:] }
-        var db: OpaquePointer?
-        guard sqlite3_open_v2(databaseURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
-            if let db { sqlite3_close(db) }
-            return [:]
-        }
-        defer { sqlite3_close(db) }
-        sqlite3_busy_timeout(db, 1000)
-
-        var statement: OpaquePointer?
-        let sql: String
-        if rangeStart != nil, rangeEnd != nil {
-            sql = """
-            SELECT ZDAYSTART, ZCOMPLETEDDURATION
-            FROM AT_DAY_SUMMARY
-            WHERE ZDAYSTART >= ?1
-              AND ZDAYSTART < ?2
-            ORDER BY ZDAYSTART
-            """
-        } else {
-            sql = """
-            SELECT ZDAYSTART, ZCOMPLETEDDURATION
-            FROM AT_DAY_SUMMARY
-            ORDER BY ZDAYSTART
-            """
-        }
-        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
-            if let statement { sqlite3_finalize(statement) }
-            return [:]
-        }
-        defer { sqlite3_finalize(statement) }
-
-        if let rangeStart, let rangeEnd {
-            sqlite3_bind_double(statement, 1, rangeStart.timeIntervalSinceReferenceDate)
-            sqlite3_bind_double(statement, 2, rangeEnd.timeIntervalSinceReferenceDate)
-        }
-
-        var summaries: [Date: TimeInterval] = [:]
-        while sqlite3_step(statement) == SQLITE_ROW {
-            let dayStart = Date(timeIntervalSinceReferenceDate: sqlite3_column_double(statement, 0))
-            let duration = sqlite3_column_double(statement, 1)
-            summaries[dayStart] = duration
-        }
-        return summaries
+        readConnection?.readMostRecentOpenSnapshot()
     }
 
     private func readClosedSnapshots(db: OpaquePointer?) -> [IntervalSnapshot] {
-        runSnapshotQuery(
-            db: db,
-            sql: """
-            SELECT ZSTARTDATE, ZENDDATE
-            FROM ZACTIVEINTERVAL
-            WHERE ZENDDATE IS NOT NULL
-            ORDER BY ZSTARTDATE
-            """,
-            bind: { _ in }
-        )
-    }
-
-    private func readSnapshots(rangeStart: Date?, rangeEnd: Date?) -> [IntervalSnapshot] {
-        guard let databaseURL else { return [] }
-        guard FileManager.default.fileExists(atPath: databaseURL.path) else { return [] }
-        var db: OpaquePointer?
-        guard sqlite3_open_v2(databaseURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
-            if let db { sqlite3_close(db) }
-            return []
-        }
-        defer { sqlite3_close(db) }
-        sqlite3_busy_timeout(db, 1000)
-
-        let sql: String
-        if let rangeStart, let rangeEnd {
-            sql = """
-            SELECT ZSTARTDATE, ZENDDATE
-            FROM ZACTIVEINTERVAL
-            WHERE ZSTARTDATE < ?1
-              AND (ZENDDATE IS NULL OR ZENDDATE > ?2)
-            ORDER BY ZSTARTDATE
-            """
-            return runSnapshotQuery(
-                db: db,
-                sql: sql,
-                bind: { statement in
-                    sqlite3_bind_double(statement, 1, rangeEnd.timeIntervalSinceReferenceDate)
-                    sqlite3_bind_double(statement, 2, rangeStart.timeIntervalSinceReferenceDate)
-                }
-            )
-        } else {
-            sql = """
-            SELECT ZSTARTDATE, ZENDDATE
-            FROM ZACTIVEINTERVAL
-            ORDER BY ZSTARTDATE
-            """
-            return runSnapshotQuery(db: db, sql: sql, bind: { _ in })
-        }
-    }
-
-    private func runSnapshotQuery(
-        db: OpaquePointer?,
-        sql: String,
-        bind: (OpaquePointer?) -> Void
-    ) -> [IntervalSnapshot] {
         var statement: OpaquePointer?
+        let sql = """
+        SELECT ZSTARTDATE, ZENDDATE
+        FROM ZACTIVEINTERVAL
+        WHERE ZENDDATE IS NOT NULL
+        ORDER BY ZSTARTDATE
+        """
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
             if let statement { sqlite3_finalize(statement) }
             return []
         }
         defer { sqlite3_finalize(statement) }
-
-        bind(statement)
 
         var snapshots: [IntervalSnapshot] = []
         while sqlite3_step(statement) == SQLITE_ROW {
             guard sqlite3_column_type(statement, 0) != SQLITE_NULL else { continue }
-            let start = sqlite3_column_double(statement, 0)
-            let end: Date?
-            if sqlite3_column_type(statement, 1) == SQLITE_NULL {
-                end = nil
-            } else {
-                end = Date(timeIntervalSinceReferenceDate: sqlite3_column_double(statement, 1))
-            }
-            snapshots.append(
-                IntervalSnapshot(
-                    startDate: Date(timeIntervalSinceReferenceDate: start),
-                    endDate: end
-                )
-            )
+            let startDate = Date(timeIntervalSinceReferenceDate: sqlite3_column_double(statement, 0))
+            let endDate = Date(timeIntervalSinceReferenceDate: sqlite3_column_double(statement, 1))
+            snapshots.append(IntervalSnapshot(startDate: startDate, endDate: endDate))
         }
         return snapshots
     }
@@ -748,15 +920,20 @@ final class PersistenceService {
         case stepFailed(String)
     }
 
-    private func runStartupChecks() -> String? {
-        guard databaseURL != nil else { return nil }
+    private func runStartupChecks() -> StartupCheckResult {
+        guard databaseURL != nil else {
+            return StartupCheckResult(warning: nil, isDaySummaryReady: true)
+        }
 
         var warning: String?
+        var summaryReady = true
+
         do {
             try withWritableStore { db in
                 let integrity = try querySingleText(db: db, sql: "PRAGMA integrity_check")
                 if integrity.lowercased() != "ok" {
                     warning = "Store integrity check reported issues. Tracking continues with recovery safeguards."
+                    summaryReady = false
                     return
                 }
 
@@ -781,13 +958,36 @@ final class PersistenceService {
                     warning = "Recovered \(openCount - 1) stale open sessions from a previous crash."
                 }
 
-                try ensureDaySummaryIsReady(db: db)
+                summaryReady = try daySummaryIsReady(db: db)
             }
         } catch {
             warning = "Store startup check failed. Tracking continues, but reliability may be reduced."
+            summaryReady = false
         }
 
-        return warning
+        return StartupCheckResult(warning: warning, isDaySummaryReady: summaryReady)
+    }
+
+    private func daySummaryIsReady(db: OpaquePointer?) throws -> Bool {
+        let storedVersion = try queryOptionalText(
+            db: db,
+            sql: """
+            SELECT ZVALUE
+            FROM AT_METADATA
+            WHERE ZKEY = ?1
+            LIMIT 1
+            """,
+            bind: { statement in
+                sqlite3_bind_text(statement, 1, MetadataKey.daySummaryVersion, -1, sqliteTransient)
+            }
+        )
+        let summaryRowCount = try querySingleInt(db: db, sql: "SELECT COUNT(*) FROM AT_DAY_SUMMARY")
+        let closedIntervalCount = try querySingleInt(
+            db: db,
+            sql: "SELECT COUNT(*) FROM ZACTIVEINTERVAL WHERE ZENDDATE IS NOT NULL"
+        )
+        return storedVersion == MetadataKey.currentDaySummaryVersion &&
+            !(summaryRowCount == 0 && closedIntervalCount > 0)
     }
 
     private func withWritableStore(_ work: (OpaquePointer?) throws -> Void) throws {
@@ -896,50 +1096,11 @@ final class PersistenceService {
         return String(cString: cMessage)
     }
 
-    private func ensureDaySummaryIsReady(db: OpaquePointer?) throws {
-        let storedVersion = try queryOptionalText(
-            db: db,
-            sql: """
-            SELECT ZVALUE
-            FROM AT_METADATA
-            WHERE ZKEY = ?1
-            LIMIT 1
-            """,
-            bind: { statement in
-                sqlite3_bind_text(statement, 1, MetadataKey.daySummaryVersion, -1, sqliteTransient)
-            }
-        )
-        let summaryRowCount = try querySingleInt(db: db, sql: "SELECT COUNT(*) FROM AT_DAY_SUMMARY")
-        let closedIntervalCount = try querySingleInt(
-            db: db,
-            sql: "SELECT COUNT(*) FROM ZACTIVEINTERVAL WHERE ZENDDATE IS NOT NULL"
-        )
-
-        let needsRebuild = storedVersion != MetadataKey.currentDaySummaryVersion ||
-            (summaryRowCount == 0 && closedIntervalCount > 0)
-        guard needsRebuild else { return }
-
-        try rebuildDaySummary(db: db)
-        _ = try executeUpdate(
-            db: db,
-            sql: """
-            INSERT INTO AT_METADATA (ZKEY, ZVALUE)
-            VALUES (?1, ?2)
-            ON CONFLICT(ZKEY) DO UPDATE
-            SET ZVALUE = excluded.ZVALUE
-            """,
-            bind: { statement in
-                sqlite3_bind_text(statement, 1, MetadataKey.daySummaryVersion, -1, sqliteTransient)
-                sqlite3_bind_text(statement, 2, MetadataKey.currentDaySummaryVersion, -1, sqliteTransient)
-            }
-        )
-    }
-
     private func rebuildDaySummary(db: OpaquePointer?) throws {
         _ = try executeUpdate(db: db, sql: "DELETE FROM AT_DAY_SUMMARY")
 
         let closedSnapshots = readClosedSnapshots(db: db)
-        let dayDurations = aggregatedDayDurations(from: closedSnapshots)
+        let dayDurations = aggregatedClosedDayDurations(from: closedSnapshots)
         for (dayStart, duration) in dayDurations {
             _ = try executeUpdate(
                 db: db,
@@ -953,6 +1114,215 @@ final class PersistenceService {
                 }
             )
         }
+    }
+
+    private func scheduleDaySummaryPreparation() {
+        guard let databaseURL, !isDaySummaryReady, !isPreparingDaySummary else { return }
+        isPreparingDaySummary = true
+
+        Task {
+            let warning = await Task.detached(priority: .utility) {
+                PersistenceService.prepareDaySummaryInBackground(at: databaseURL)
+            }.value
+
+            isPreparingDaySummary = false
+            if let warning {
+                startupWarning = startupWarning ?? warning
+            } else {
+                isDaySummaryReady = true
+                invalidateDaySummaryCache()
+            }
+            notifyPersistenceDidChange()
+        }
+    }
+
+    nonisolated private static func prepareDaySummaryInBackground(at databaseURL: URL) -> String? {
+        do {
+            try withBackgroundWritableStore(at: databaseURL) { db in
+                let storedVersion = try backgroundQueryOptionalText(
+                    db: db,
+                    sql: """
+                    SELECT ZVALUE
+                    FROM AT_METADATA
+                    WHERE ZKEY = ?1
+                    LIMIT 1
+                    """,
+                    bind: { statement in
+                        sqlite3_bind_text(statement, 1, MetadataKey.daySummaryVersion, -1, sqliteTransient)
+                    }
+                )
+                let summaryRowCount = try backgroundQuerySingleInt(db: db, sql: "SELECT COUNT(*) FROM AT_DAY_SUMMARY")
+                let closedIntervalCount = try backgroundQuerySingleInt(
+                    db: db,
+                    sql: "SELECT COUNT(*) FROM ZACTIVEINTERVAL WHERE ZENDDATE IS NOT NULL"
+                )
+
+                let needsRebuild = storedVersion != MetadataKey.currentDaySummaryVersion ||
+                    (summaryRowCount == 0 && closedIntervalCount > 0)
+                guard needsRebuild else { return }
+
+                try backgroundExecuteUpdate(db: db, sql: "DELETE FROM AT_DAY_SUMMARY")
+                let snapshots = SQLiteReadConnection(databaseURL: databaseURL).readSnapshots(rangeStart: nil, rangeEnd: nil)
+                let dayDurations = aggregatedClosedDayDurations(from: snapshots)
+                for (dayStart, duration) in dayDurations {
+                    try backgroundExecuteUpdate(
+                        db: db,
+                        sql: """
+                        INSERT INTO AT_DAY_SUMMARY (ZDAYSTART, ZCOMPLETEDDURATION)
+                        VALUES (?1, ?2)
+                        """,
+                        bind: { statement in
+                            sqlite3_bind_double(statement, 1, dayStart.timeIntervalSinceReferenceDate)
+                            sqlite3_bind_double(statement, 2, duration)
+                        }
+                    )
+                }
+                try backgroundExecuteUpdate(
+                    db: db,
+                    sql: """
+                    INSERT INTO AT_METADATA (ZKEY, ZVALUE)
+                    VALUES (?1, ?2)
+                    ON CONFLICT(ZKEY) DO UPDATE
+                    SET ZVALUE = excluded.ZVALUE
+                    """,
+                    bind: { statement in
+                        sqlite3_bind_text(statement, 1, MetadataKey.daySummaryVersion, -1, sqliteTransient)
+                        sqlite3_bind_text(statement, 2, MetadataKey.currentDaySummaryVersion, -1, sqliteTransient)
+                    }
+                )
+            }
+            return nil
+        } catch {
+            return "History summary refresh failed in the background. The app will continue using direct interval reads."
+        }
+    }
+
+    nonisolated private static func withBackgroundWritableStore(
+        at databaseURL: URL,
+        work: (OpaquePointer?) throws -> Void
+    ) throws {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(databaseURL.path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK else {
+            let message = db.flatMap(backgroundSQLiteMessage(db:)) ?? "Failed to open sqlite store"
+            if let db { sqlite3_close(db) }
+            throw SQLitePersistenceFailure.openFailed(message)
+        }
+        defer { sqlite3_close(db) }
+
+        sqlite3_busy_timeout(db, 1000)
+        try ensureBackgroundSchema(db: db)
+        do {
+            try backgroundExecuteUpdate(db: db, sql: "BEGIN IMMEDIATE")
+            try work(db)
+            try backgroundExecuteUpdate(db: db, sql: "COMMIT")
+        } catch {
+            try? backgroundExecuteUpdate(db: db, sql: "ROLLBACK")
+            throw error
+        }
+    }
+
+    nonisolated private static func ensureBackgroundSchema(db: OpaquePointer?) throws {
+        try backgroundExecuteUpdate(
+            db: db,
+            sql: """
+            CREATE TABLE IF NOT EXISTS ZACTIVEINTERVAL (
+                Z_PK INTEGER PRIMARY KEY,
+                Z_ENT INTEGER,
+                Z_OPT INTEGER,
+                ZENDDATE TIMESTAMP,
+                ZSTARTDATE TIMESTAMP
+            )
+            """
+        )
+        try backgroundExecuteUpdate(
+            db: db,
+            sql: """
+            CREATE TABLE IF NOT EXISTS Z_PRIMARYKEY (
+                Z_ENT INTEGER PRIMARY KEY,
+                Z_NAME VARCHAR,
+                Z_SUPER INTEGER,
+                Z_MAX INTEGER
+            )
+            """
+        )
+        try backgroundExecuteUpdate(
+            db: db,
+            sql: """
+            CREATE TABLE IF NOT EXISTS AT_DAY_SUMMARY (
+                ZDAYSTART REAL PRIMARY KEY,
+                ZCOMPLETEDDURATION REAL NOT NULL
+            )
+            """
+        )
+        try backgroundExecuteUpdate(
+            db: db,
+            sql: """
+            CREATE TABLE IF NOT EXISTS AT_METADATA (
+                ZKEY TEXT PRIMARY KEY,
+                ZVALUE TEXT NOT NULL
+            )
+            """
+        )
+    }
+
+    nonisolated private static func backgroundExecuteUpdate(
+        db: OpaquePointer?,
+        sql: String,
+        bind: (OpaquePointer?) -> Void = { _ in }
+    ) throws {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            if let statement { sqlite3_finalize(statement) }
+            throw SQLitePersistenceFailure.prepareFailed(backgroundSQLiteMessage(db: db))
+        }
+        defer { sqlite3_finalize(statement) }
+
+        bind(statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw SQLitePersistenceFailure.stepFailed(backgroundSQLiteMessage(db: db))
+        }
+    }
+
+    nonisolated private static func backgroundQuerySingleInt(
+        db: OpaquePointer?,
+        sql: String
+    ) throws -> Int {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            if let statement { sqlite3_finalize(statement) }
+            throw SQLitePersistenceFailure.prepareFailed(backgroundSQLiteMessage(db: db))
+        }
+        defer { sqlite3_finalize(statement) }
+
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw SQLitePersistenceFailure.stepFailed(backgroundSQLiteMessage(db: db))
+        }
+        return Int(sqlite3_column_int(statement, 0))
+    }
+
+    nonisolated private static func backgroundQueryOptionalText(
+        db: OpaquePointer?,
+        sql: String,
+        bind: (OpaquePointer?) -> Void
+    ) throws -> String? {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            if let statement { sqlite3_finalize(statement) }
+            throw SQLitePersistenceFailure.prepareFailed(backgroundSQLiteMessage(db: db))
+        }
+        defer { sqlite3_finalize(statement) }
+
+        bind(statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        guard let cString = sqlite3_column_text(statement, 0) else { return nil }
+        return String(cString: cString)
+    }
+
+    nonisolated private static func backgroundSQLiteMessage(db: OpaquePointer?) -> String {
+        guard let db, let cMessage = sqlite3_errmsg(db) else {
+            return "Unknown sqlite error"
+        }
+        return String(cString: cMessage)
     }
 
     private func syncPrimaryKey(db: OpaquePointer?) throws {
@@ -972,12 +1342,6 @@ final class PersistenceService {
             WHERE NOT EXISTS (SELECT 1 FROM Z_PRIMARYKEY WHERE Z_NAME = 'ActiveInterval')
             """
         )
-    }
-
-    private func clampedDuration(of snapshot: IntervalSnapshot, dayStart: Date, dayEnd: Date) -> TimeInterval {
-        let effectiveStart = max(snapshot.startDate, dayStart)
-        let effectiveEnd = min(snapshot.endDate ?? .now, dayEnd)
-        return max(0, effectiveEnd.timeIntervalSince(effectiveStart))
     }
 
     private func buildDailyTotals(

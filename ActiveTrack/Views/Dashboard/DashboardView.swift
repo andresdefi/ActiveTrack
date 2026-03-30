@@ -21,6 +21,7 @@ struct DashboardView: View {
     @State private var selectedItem: DashboardSelection = .overview
     @State private var monthSections: [DashboardMonthSection] = []
     @State private var expandedMonths: Set<Date> = []
+    @State private var persistedDayDurations: [Date: TimeInterval] = [:]
     @State private var dayDurations: [Date: TimeInterval] = [:]
     @State private var splitVisibility: NavigationSplitViewVisibility = .all
 
@@ -54,14 +55,17 @@ struct DashboardView: View {
         }
         .navigationTitle("ActiveTrack")
         .onAppear {
-            refreshDays()
+            Task { await reloadHistory() }
         }
         .onChange(of: timerService.isRunning) {
-            refreshDays()
+            applyLiveTodayOverlay()
         }
         .onReceive(NotificationCenter.default.publisher(for: .activeTrackDisplayTimeChanged)) { _ in
             guard timerService.isRunning else { return }
-            refreshDays()
+            applyLiveTodayOverlay()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .activeTrackPersistenceDidChange)) { _ in
+            Task { await reloadHistory() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .activeTrackShowDashboardOverview)) { _ in
             showOverview()
@@ -142,14 +146,34 @@ struct DashboardView: View {
         }
     }
 
-    private func refreshDays() {
-        var durations = persistenceService.allDayDurations()
-        if timerService.isRunning {
-            let today = Calendar.current.startOfDay(for: .now)
-            durations[today, default: 0] += timerService.currentIntervalElapsed
-        }
-        let days = durations.keys.sorted(by: >)
+    private func reloadHistory() async {
+        persistedDayDurations = await persistenceService.allDayDurationsAsync()
+        let durations = displayedDurations()
         dayDurations = durations
+        rebuildMonthSections(using: durations)
+    }
+
+    private func applyLiveTodayOverlay() {
+        let durations = displayedDurations()
+        dayDurations = durations
+        updateCurrentMonthSection(using: durations)
+    }
+
+    private func displayedDurations() -> [Date: TimeInterval] {
+        var durations = persistedDayDurations
+        let today = Calendar.current.startOfDay(for: .now)
+        let liveDuration = timerService.isRunning ? timerService.currentIntervalElapsed : 0
+        let total = (durations[today] ?? 0) + liveDuration
+        if total > 0.000_001 {
+            durations[today] = total
+        } else {
+            durations.removeValue(forKey: today)
+        }
+        return durations
+    }
+
+    private func rebuildMonthSections(using durations: [Date: TimeInterval]) {
+        let days = durations.keys.sorted(by: >)
         monthSections = buildMonthSections(from: days, durations: durations)
 
         var expanded = expandedMonths.intersection(Set(monthSections.map(\.id)))
@@ -158,6 +182,41 @@ struct DashboardView: View {
             expanded.insert(selectedMonth)
         }
         expandedMonths = expanded
+    }
+
+    private func updateCurrentMonthSection(using durations: [Date: TimeInterval]) {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        guard let currentMonth = calendar.date(from: calendar.dateComponents([.year, .month], from: today)) else {
+            return
+        }
+
+        let monthDays = durations.keys
+            .filter { day in
+                calendar.date(from: calendar.dateComponents([.year, .month], from: day)) == currentMonth
+            }
+            .sorted(by: >)
+
+        if monthDays.isEmpty {
+            monthSections.removeAll { $0.id == currentMonth }
+            expandedMonths.remove(currentMonth)
+            return
+        }
+
+        let total = monthDays.reduce(0) { $0 + (durations[$1] ?? 0) }
+        let updatedSection = DashboardMonthSection(
+            monthStart: currentMonth,
+            title: currentMonth.monthYearString,
+            average: total / Double(monthDays.count),
+            days: monthDays
+        )
+
+        if let sectionIndex = monthSections.firstIndex(where: { $0.id == currentMonth }) {
+            monthSections[sectionIndex] = updatedSection
+        } else {
+            monthSections.append(updatedSection)
+            monthSections.sort { $0.monthStart > $1.monthStart }
+        }
     }
 
     private func durationForDay(_ day: Date) -> TimeInterval {
@@ -235,4 +294,5 @@ extension Notification.Name {
     static let activeTrackTargetReached = Notification.Name("ActiveTrackTargetReached")
     static let activeTrackDisplayTimeChanged = Notification.Name("ActiveTrackDisplayTimeChanged")
     static let activeTrackTimerStatusChanged = Notification.Name("ActiveTrackTimerStatusChanged")
+    static let activeTrackPersistenceDidChange = Notification.Name("ActiveTrackPersistenceDidChange")
 }
