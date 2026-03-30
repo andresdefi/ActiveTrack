@@ -13,24 +13,10 @@ enum AggregateChartMetric: String, CaseIterable {
 
 struct ChartContainerView: View {
     let timerService: TimerService
-    let persistenceService: PersistenceService
+    let historyStore: DashboardHistoryStore
+
     @State private var selectedPeriod: ChartPeriod = .daily
     @State private var aggregateMetric: AggregateChartMetric = .total
-    @State private var persistedDailyData: [DailyTotal] = []
-    @State private var persistedWeeklyData: [WeeklyTotal] = []
-    @State private var persistedMonthlyData: [MonthlyTotal] = []
-
-    private var displayedDailyData: [DailyTotal] {
-        overlayDailyTotals(persistedDailyData)
-    }
-
-    private var displayedWeeklyData: [WeeklyTotal] {
-        overlayWeeklyTotals(persistedWeeklyData)
-    }
-
-    private var displayedMonthlyData: [MonthlyTotal] {
-        overlayMonthlyTotals(persistedMonthlyData)
-    }
 
     var body: some View {
         ScrollView {
@@ -53,51 +39,85 @@ struct ChartContainerView: View {
                     .frame(maxWidth: 240)
                 }
 
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-                    LiveTodayDashboardMetricCard(timerService: timerService)
-                    DashboardMetricCard(
-                        title: "Average / Day",
-                        value: averageDuration(for: displayedDailyData).formattedHoursMinutes,
-                        caption: "Across the last 14 days"
-                    )
-                    DashboardMetricCard(
-                        title: "Average / Week",
-                        value: averageDuration(for: displayedWeeklyData).formattedHoursMinutes,
-                        caption: "Across the last 12 weeks"
-                    )
-                    DashboardMetricCard(
-                        title: "Average / Month",
-                        value: averageDuration(for: displayedMonthlyData).formattedHoursMinutes,
-                        caption: "Across the last 12 months"
-                    )
-                }
-
-                switch selectedPeriod {
-                case .daily:
-                    DailyChartView(data: displayedDailyData)
-                case .weekly:
-                    WeeklyChartView(data: displayedWeeklyData, metric: aggregateMetric)
-                case .monthly:
-                    MonthlyChartView(data: displayedMonthlyData, metric: aggregateMetric)
-                }
+                DashboardMetricsGrid(timerService: timerService, chartData: historyStore.chartData)
+                SelectedHistoryChart(
+                    timerService: timerService,
+                    chartData: historyStore.chartData,
+                    selectedPeriod: selectedPeriod,
+                    aggregateMetric: aggregateMetric
+                )
             }
         }
         .padding()
-        .task { await reloadPersistedData() }
-        .onReceive(NotificationCenter.default.publisher(for: .activeTrackPersistenceDidChange)) { _ in
-            Task { await reloadPersistedData() }
+    }
+}
+
+private struct DashboardMetricsGrid: View {
+    let timerService: TimerService
+    let chartData: HistoryChartData
+
+    var body: some View {
+        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+            LiveTodayDashboardMetricCard(timerService: timerService)
+            DashboardMetricCard(
+                title: "Average / Day",
+                value: HistoryChartOverlay.averageDuration(for: displayedDailyData).formattedHoursMinutes,
+                caption: "Across the last 14 days"
+            )
+            DashboardMetricCard(
+                title: "Average / Week",
+                value: HistoryChartOverlay.averageDuration(for: displayedWeeklyData).formattedHoursMinutes,
+                caption: "Across the last 12 weeks"
+            )
+            DashboardMetricCard(
+                title: "Average / Month",
+                value: HistoryChartOverlay.averageDuration(for: displayedMonthlyData).formattedHoursMinutes,
+                caption: "Across the last 12 months"
+            )
         }
     }
 
-    private func reloadPersistedData() async {
-        let chartData = await persistenceService.chartDataAsync(days: 14, weeks: 12, months: 12)
-        persistedDailyData = chartData.daily
-        persistedWeeklyData = chartData.weekly
-        persistedMonthlyData = chartData.monthly
+    private var displayedDailyData: [DailyTotal] {
+        HistoryChartOverlay.overlayDailyTotals(chartData.daily, timerService: timerService)
     }
 
-    private func overlayDailyTotals(_ items: [DailyTotal]) -> [DailyTotal] {
-        let runningElapsed = liveOverlayDuration
+    private var displayedWeeklyData: [WeeklyTotal] {
+        HistoryChartOverlay.overlayWeeklyTotals(chartData.weekly, timerService: timerService)
+    }
+
+    private var displayedMonthlyData: [MonthlyTotal] {
+        HistoryChartOverlay.overlayMonthlyTotals(chartData.monthly, timerService: timerService)
+    }
+}
+
+private struct SelectedHistoryChart: View {
+    let timerService: TimerService
+    let chartData: HistoryChartData
+    let selectedPeriod: ChartPeriod
+    let aggregateMetric: AggregateChartMetric
+
+    var body: some View {
+        switch selectedPeriod {
+        case .daily:
+            DailyChartView(data: HistoryChartOverlay.overlayDailyTotals(chartData.daily, timerService: timerService))
+        case .weekly:
+            WeeklyChartView(
+                data: HistoryChartOverlay.overlayWeeklyTotals(chartData.weekly, timerService: timerService),
+                metric: aggregateMetric
+            )
+        case .monthly:
+            MonthlyChartView(
+                data: HistoryChartOverlay.overlayMonthlyTotals(chartData.monthly, timerService: timerService),
+                metric: aggregateMetric
+            )
+        }
+    }
+}
+
+@MainActor
+private enum HistoryChartOverlay {
+    static func overlayDailyTotals(_ items: [DailyTotal], timerService: TimerService) -> [DailyTotal] {
+        let runningElapsed = liveOverlayDuration(timerService: timerService)
         guard runningElapsed > 0 else { return items }
         let today = Calendar.current.startOfDay(for: .now)
         if let dailyIndex = items.firstIndex(where: { $0.date == today }) {
@@ -108,8 +128,8 @@ struct ChartContainerView: View {
         return items
     }
 
-    private func overlayWeeklyTotals(_ items: [WeeklyTotal]) -> [WeeklyTotal] {
-        let runningElapsed = liveOverlayDuration
+    static func overlayWeeklyTotals(_ items: [WeeklyTotal], timerService: TimerService) -> [WeeklyTotal] {
+        let runningElapsed = liveOverlayDuration(timerService: timerService)
         guard runningElapsed > 0 else { return items }
 
         let calendar = Calendar.current
@@ -126,8 +146,8 @@ struct ChartContainerView: View {
         return items
     }
 
-    private func overlayMonthlyTotals(_ items: [MonthlyTotal]) -> [MonthlyTotal] {
-        let runningElapsed = liveOverlayDuration
+    static func overlayMonthlyTotals(_ items: [MonthlyTotal], timerService: TimerService) -> [MonthlyTotal] {
+        let runningElapsed = liveOverlayDuration(timerService: timerService)
         guard runningElapsed > 0 else { return items }
 
         let calendar = Calendar.current
@@ -144,15 +164,15 @@ struct ChartContainerView: View {
         return items
     }
 
-    private var liveOverlayDuration: TimeInterval {
-        guard timerService.isRunning else { return 0 }
-        return timerService.currentIntervalElapsed
-    }
-
-    private func averageDuration<T>(for items: [T]) -> TimeInterval where T: DurationReadable {
+    static func averageDuration<T>(for items: [T]) -> TimeInterval where T: DurationReadable {
         guard !items.isEmpty else { return 0 }
         let total = items.reduce(0) { $0 + $1.duration }
         return total / Double(items.count)
+    }
+
+    private static func liveOverlayDuration(timerService: TimerService) -> TimeInterval {
+        guard timerService.isRunning else { return 0 }
+        return timerService.currentIntervalElapsed
     }
 }
 

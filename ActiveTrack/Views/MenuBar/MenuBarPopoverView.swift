@@ -7,7 +7,7 @@ struct MenuBarPopoverView: View {
     @Environment(\.openWindow) private var openWindow
     @AppStorage("lastSeenReleaseNotesVersion") private var lastSeenReleaseNotesVersion = ""
     @State private var showingWhatsNew = false
-    private let currentReleaseNotesVersion = "1.2.6"
+    private let currentReleaseNotesVersion = "1.2.7"
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
@@ -121,11 +121,11 @@ struct MenuBarPopoverView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("What's New in \(currentReleaseNotesVersion)")
                 .font(.title3.bold())
-            Text("• Reused a persistent writable SQLite connection so start and pause writes avoid repeated open-and-schema work")
-            Text("• Stopped the day detail screen from reloading storage every minute while a session is running")
-            Text("• Kept dashboard sidebar totals and chart cards live without copying full history on each display refresh")
-            Text("• Preserved stable interval identities so the detail list updates without unnecessary row churn")
-            Text("• Added regression coverage for live interval overlays and day-summary reads")
+            Text("• Moved the dashboard to a shared history store so charts and sidebar reuse one persisted snapshot")
+            Text("• Changed persistence notifications to carry affected days, letting screens patch only what changed")
+            Text("• Moved the full SQLite integrity check off the cold-start path to keep launch work lighter")
+            Text("• Narrowed live dashboard recomputation so timer ticks update smaller UI surfaces")
+            Text("• Reused the menu bar popover host instead of rebuilding the SwiftUI tree on each open")
             HStack {
                 Spacer()
                 Button("Done") {

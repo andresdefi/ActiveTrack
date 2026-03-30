@@ -39,6 +39,37 @@ struct HistoryChartData: Sendable {
     let monthly: [MonthlyTotal]
 }
 
+struct DashboardHistorySnapshot: Sendable {
+    let dayDurations: [Date: TimeInterval]
+    let chartData: HistoryChartData
+}
+
+struct PersistenceChange: Sendable, Equatable {
+    enum Kind: Sendable, Equatable {
+        case dayDurationsChanged
+        case fullReload
+    }
+
+    let kind: Kind
+    let affectedDays: Set<Date>
+
+    init(kind: Kind, affectedDays: Set<Date> = []) {
+        let calendar = Calendar.current
+        self.kind = kind
+        self.affectedDays = Set(affectedDays.map { calendar.startOfDay(for: $0) })
+    }
+
+    static let fullReload = PersistenceChange(kind: .fullReload)
+
+    var requiresFullReload: Bool {
+        kind == .fullReload
+    }
+
+    func affects(day: Date, calendar: Calendar = .current) -> Bool {
+        requiresFullReload || affectedDays.contains(calendar.startOfDay(for: day))
+    }
+}
+
 struct DayIntervalSummary: Identifiable, Sendable, Hashable {
     let start: Date
     let end: Date
@@ -322,6 +353,7 @@ final class PersistenceService {
     private var cachedDaySummaryDurations: [Date: TimeInterval]?
     private var isDaySummaryReady = true
     private var isPreparingDaySummary = false
+    private var isRunningIntegrityCheck = false
     private var hasEnsuredWritableSchema = false
 
     init(modelContext: ModelContext, storeURL: URL? = nil) {
@@ -334,6 +366,9 @@ final class PersistenceService {
         self.isDaySummaryReady = startupCheck.isDaySummaryReady
         if storeURL != nil, !startupCheck.isDaySummaryReady {
             scheduleDaySummaryPreparation()
+        }
+        if storeURL != nil {
+            scheduleBackgroundIntegrityCheck()
         }
     }
 
@@ -354,7 +389,6 @@ final class PersistenceService {
             modelContext.insert(interval)
             do {
                 try modelContext.save()
-                notifyPersistenceDidChange()
                 return interval
             } catch {
                 throw PersistenceError.saveFailed(underlying: error.localizedDescription)
@@ -376,7 +410,6 @@ final class PersistenceService {
                 try syncPrimaryKey(db: db)
             }
             invalidateDaySummaryCache()
-            notifyPersistenceDidChange()
             return ActiveInterval(startDate: startDate)
         } catch {
             throw PersistenceError.saveFailed(underlying: String(describing: error))
@@ -385,10 +418,11 @@ final class PersistenceService {
 
     func closeInterval(_ interval: ActiveInterval, endDate: Date = .now) throws {
         guard databaseURL != nil else {
+            let changedDays = affectedDays(from: interval.startDate, to: endDate)
             interval.endDate = endDate
             do {
                 try modelContext.save()
-                notifyPersistenceDidChange()
+                notifyPersistenceDidChange(PersistenceChange(kind: .dayDurationsChanged, affectedDays: changedDays))
                 return
             } catch {
                 throw PersistenceError.saveFailed(underlying: error.localizedDescription)
@@ -396,8 +430,10 @@ final class PersistenceService {
         }
 
         do {
+            var changedDays: Set<Date> = []
             try withWritableStore { db in
                 guard let openRecord = try readMostRecentOpenIntervalRecord(db: db) else { return }
+                changedDays = affectedDays(from: openRecord.startDate, to: endDate)
                 _ = try executeUpdate(
                     db: db,
                     sql: """
@@ -413,7 +449,7 @@ final class PersistenceService {
                 try applyDaySummaryDelta(startDate: openRecord.startDate, endDate: endDate, multiplier: 1, db: db)
             }
             invalidateDaySummaryCache()
-            notifyPersistenceDidChange()
+            notifyPersistenceDidChange(PersistenceChange(kind: .dayDurationsChanged, affectedDays: changedDays))
         } catch {
             throw PersistenceError.saveFailed(underlying: String(describing: error))
         }
@@ -421,10 +457,13 @@ final class PersistenceService {
 
     func deleteInterval(_ interval: ActiveInterval) throws {
         guard databaseURL != nil else {
+            let changedDays = affectedDays(from: interval.startDate, to: interval.endDate)
             modelContext.delete(interval)
             do {
                 try modelContext.save()
-                notifyPersistenceDidChange()
+                if !changedDays.isEmpty {
+                    notifyPersistenceDidChange(PersistenceChange(kind: .dayDurationsChanged, affectedDays: changedDays))
+                }
                 return
             } catch {
                 throw PersistenceError.saveFailed(underlying: error.localizedDescription)
@@ -432,8 +471,10 @@ final class PersistenceService {
         }
 
         do {
+            var changedDays: Set<Date> = []
             try withWritableStore { db in
                 guard let intervalRecord = try readIntervalRecord(db: db, matchingStartDate: interval.startDate) else { return }
+                changedDays = affectedDays(from: intervalRecord.startDate, to: intervalRecord.endDate)
                 _ = try executeUpdate(
                     db: db,
                     sql: """
@@ -450,7 +491,9 @@ final class PersistenceService {
                 try syncPrimaryKey(db: db)
             }
             invalidateDaySummaryCache()
-            notifyPersistenceDidChange()
+            if !changedDays.isEmpty {
+                notifyPersistenceDidChange(PersistenceChange(kind: .dayDurationsChanged, affectedDays: changedDays))
+            }
         } catch {
             throw PersistenceError.saveFailed(underlying: String(describing: error))
         }
@@ -460,6 +503,7 @@ final class PersistenceService {
         let calendar = Calendar.current
         let dayStart = calendar.startOfDay(for: .now)
         let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart)!
+        let changedDays: Set<Date> = [dayStart]
 
         guard databaseURL != nil else {
             let all = fetchAllIntervals()
@@ -473,7 +517,7 @@ final class PersistenceService {
             }
             do {
                 try modelContext.save()
-                notifyPersistenceDidChange()
+                notifyPersistenceDidChange(PersistenceChange(kind: .dayDurationsChanged, affectedDays: changedDays))
                 return
             } catch {
                 throw PersistenceError.saveFailed(underlying: error.localizedDescription)
@@ -519,7 +563,7 @@ final class PersistenceService {
                 try syncPrimaryKey(db: db)
             }
             invalidateDaySummaryCache()
-            notifyPersistenceDidChange()
+            notifyPersistenceDidChange(PersistenceChange(kind: .dayDurationsChanged, affectedDays: changedDays))
         } catch {
             throw PersistenceError.saveFailed(underlying: String(describing: error))
         }
@@ -629,9 +673,45 @@ final class PersistenceService {
         await completedDayDurationsAsync()
     }
 
+    func dashboardHistorySnapshotAsync(days: Int = 14, weeks: Int = 12, months: Int = 12) async -> DashboardHistorySnapshot {
+        let dayDurations = await completedDayDurationsAsync()
+        let chartData = chartData(from: dayDurations, days: days, weeks: weeks, months: months)
+        return DashboardHistorySnapshot(dayDurations: dayDurations, chartData: chartData)
+    }
+
+    func dayDurationsAsync(for days: Set<Date>) async -> [Date: TimeInterval] {
+        let calendar = Calendar.current
+        let normalizedDays = Set(days.map { calendar.startOfDay(for: $0) })
+        guard let firstDay = normalizedDays.min(),
+              let lastDay = normalizedDays.max(),
+              let rangeEnd = calendar.date(byAdding: .day, value: 1, to: lastDay) else {
+            return [:]
+        }
+
+        let dayDurations = await completedDayDurationsAsync(rangeStart: firstDay, rangeEnd: rangeEnd)
+        var filtered: [Date: TimeInterval] = [:]
+        for day in normalizedDays {
+            if let duration = dayDurations[day], duration > 0.000_001 {
+                filtered[day] = duration
+            }
+        }
+        return filtered
+    }
+
     func chartData(days: Int = 14, weeks: Int = 12, months: Int = 12) -> HistoryChartData {
         buildChartData(days: days, weeks: weeks, months: months) { rangeStart, rangeEnd in
             completedDayDurations(rangeStart: rangeStart, rangeEnd: rangeEnd)
+        }
+    }
+
+    func chartData(
+        from dayDurations: [Date: TimeInterval],
+        days: Int = 14,
+        weeks: Int = 12,
+        months: Int = 12
+    ) -> HistoryChartData {
+        buildChartData(days: days, weeks: weeks, months: months) { rangeStart, rangeEnd in
+            filteredDayDurations(dayDurations, rangeStart: rangeStart, rangeEnd: rangeEnd)
         }
     }
 
@@ -813,8 +893,34 @@ final class PersistenceService {
         cachedDaySummaryDurations = nil
     }
 
-    private func notifyPersistenceDidChange() {
-        NotificationCenter.default.post(name: .activeTrackPersistenceDidChange, object: nil)
+    private func filteredDayDurations(
+        _ dayDurations: [Date: TimeInterval],
+        rangeStart: Date,
+        rangeEnd: Date
+    ) -> [Date: TimeInterval] {
+        dayDurations.filter { day, _ in
+            day >= rangeStart && day < rangeEnd
+        }
+    }
+
+    private func affectedDays(from startDate: Date, to endDate: Date?) -> Set<Date> {
+        guard let endDate, endDate > startDate else { return [] }
+
+        let calendar = Calendar.current
+        var affectedDays: Set<Date> = []
+        var dayStart = calendar.startOfDay(for: startDate)
+
+        while dayStart < endDate {
+            affectedDays.insert(dayStart)
+            guard let nextDay = calendar.date(byAdding: .day, value: 1, to: dayStart) else { break }
+            dayStart = nextDay
+        }
+
+        return affectedDays
+    }
+
+    private func notifyPersistenceDidChange(_ change: PersistenceChange = .fullReload) {
+        NotificationCenter.default.post(name: .activeTrackPersistenceDidChange, object: change)
     }
 
     private func readMostRecentOpenIntervalRecord(db: OpaquePointer?) throws -> IntervalRecord? {
@@ -965,13 +1071,6 @@ final class PersistenceService {
 
         do {
             try withWritableStore { db in
-                let integrity = try querySingleText(db: db, sql: "PRAGMA integrity_check")
-                if integrity.lowercased() != "ok" {
-                    warning = "Store integrity check reported issues. Tracking continues with recovery safeguards."
-                    summaryReady = false
-                    return
-                }
-
                 let openCount = try querySingleInt(
                     db: db,
                     sql: "SELECT COUNT(*) FROM ZACTIVEINTERVAL WHERE ZENDDATE IS NULL"
@@ -1001,6 +1100,21 @@ final class PersistenceService {
         }
 
         return StartupCheckResult(warning: warning, isDaySummaryReady: summaryReady)
+    }
+
+    private func scheduleBackgroundIntegrityCheck() {
+        guard let databaseURL, !isRunningIntegrityCheck else { return }
+        isRunningIntegrityCheck = true
+
+        Task {
+            let warning = await Task.detached(priority: .utility) {
+                PersistenceService.runIntegrityCheckInBackground(at: databaseURL)
+            }.value
+
+            isRunningIntegrityCheck = false
+            guard let warning else { return }
+            startupWarning = startupWarning ?? warning
+        }
     }
 
     private func daySummaryIsReady(db: OpaquePointer?) throws -> Bool {
@@ -1182,7 +1296,26 @@ final class PersistenceService {
                 isDaySummaryReady = true
                 invalidateDaySummaryCache()
             }
-            notifyPersistenceDidChange()
+            notifyPersistenceDidChange(.fullReload)
+        }
+    }
+
+    nonisolated private static func runIntegrityCheckInBackground(at databaseURL: URL) -> String? {
+        do {
+            var db: OpaquePointer?
+            guard sqlite3_open_v2(databaseURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+                let message = db.flatMap(backgroundSQLiteMessage(db:)) ?? "Failed to open sqlite store"
+                if let db { sqlite3_close(db) }
+                throw SQLitePersistenceFailure.openFailed(message)
+            }
+            defer { sqlite3_close(db) }
+
+            sqlite3_busy_timeout(db, 1000)
+            let integrity = try backgroundQuerySingleText(db: db, sql: "PRAGMA integrity_check")
+            guard integrity.lowercased() != "ok" else { return nil }
+            return "Store integrity check reported issues. Tracking continues with recovery safeguards."
+        } catch {
+            return "Store integrity check failed in the background. Tracking continues with recovery safeguards."
         }
     }
 
@@ -1348,6 +1481,24 @@ final class PersistenceService {
             throw SQLitePersistenceFailure.stepFailed(backgroundSQLiteMessage(db: db))
         }
         return Int(sqlite3_column_int(statement, 0))
+    }
+
+    nonisolated private static func backgroundQuerySingleText(
+        db: OpaquePointer?,
+        sql: String
+    ) throws -> String {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            if let statement { sqlite3_finalize(statement) }
+            throw SQLitePersistenceFailure.prepareFailed(backgroundSQLiteMessage(db: db))
+        }
+        defer { sqlite3_finalize(statement) }
+
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw SQLitePersistenceFailure.stepFailed(backgroundSQLiteMessage(db: db))
+        }
+        guard let cString = sqlite3_column_text(statement, 0) else { return "" }
+        return String(cString: cString)
     }
 
     nonisolated private static func backgroundQueryOptionalText(

@@ -285,6 +285,82 @@ final class PersistenceServiceTests: XCTestCase {
         }
     }
 
+    func testDashboardHistorySnapshotUsesSingleHistoryLoad() async throws {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today)!
+
+        context.insert(
+            ActiveInterval(
+                startDate: calendar.date(bySettingHour: 9, minute: 0, second: 0, of: today)!,
+                endDate: calendar.date(bySettingHour: 10, minute: 0, second: 0, of: today)!
+            )
+        )
+        context.insert(
+            ActiveInterval(
+                startDate: calendar.date(bySettingHour: 13, minute: 0, second: 0, of: yesterday)!,
+                endDate: calendar.date(bySettingHour: 15, minute: 0, second: 0, of: yesterday)!
+            )
+        )
+        try context.save()
+
+        let snapshot = await service.dashboardHistorySnapshotAsync()
+
+        XCTAssertEqual(snapshot.dayDurations[today] ?? 0, 3600, accuracy: 2)
+        XCTAssertEqual(snapshot.dayDurations[yesterday] ?? 0, 7200, accuracy: 2)
+        XCTAssertEqual(snapshot.chartData.daily.map(\.duration), service.chartData().daily.map(\.duration))
+    }
+
+    func testDayDurationsAsyncForSpecificDaysReturnsOnlyRequestedDays() async throws {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today)!
+        let twoDaysAgo = calendar.date(byAdding: .day, value: -2, to: today)!
+
+        for (day, hours) in [(today, 1.0), (yesterday, 2.0), (twoDaysAgo, 3.0)] {
+            context.insert(
+                ActiveInterval(
+                    startDate: calendar.date(bySettingHour: 9, minute: 0, second: 0, of: day)!,
+                    endDate: calendar.date(bySettingHour: 9 + Int(hours), minute: 0, second: 0, of: day)!
+                )
+            )
+        }
+        try context.save()
+
+        let durations = await service.dayDurationsAsync(for: [today, twoDaysAgo])
+
+        XCTAssertEqual(durations.count, 2)
+        XCTAssertEqual(durations[today] ?? 0, 3600, accuracy: 2)
+        XCTAssertEqual(durations[twoDaysAgo] ?? 0, 10_800, accuracy: 2)
+        XCTAssertNil(durations[yesterday])
+    }
+
+    func testCloseIntervalPostsAffectedDayChange() throws {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        let interval = try service.createInterval(
+            startDate: calendar.date(bySettingHour: 9, minute: 0, second: 0, of: today)!
+        )
+
+        var receivedChange: PersistenceChange?
+        let observer = NotificationCenter.default.addObserver(
+            forName: .activeTrackPersistenceDidChange,
+            object: nil,
+            queue: nil
+        ) { notification in
+            receivedChange = notification.object as? PersistenceChange
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        try service.closeInterval(
+            interval,
+            endDate: calendar.date(bySettingHour: 10, minute: 0, second: 0, of: today)!
+        )
+
+        XCTAssertEqual(receivedChange?.kind, .dayDurationsChanged)
+        XCTAssertEqual(receivedChange?.affectedDays, Set([today]))
+    }
+
     // MARK: - fetchOpenInterval Ordering
 
     func testFetchOpenIntervalReturnsMostRecent() {

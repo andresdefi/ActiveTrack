@@ -8,11 +8,11 @@ struct DayDetailView: View {
     @State private var persistedIntervals: [DayIntervalSummary] = []
 
     private var displayedIntervals: [DayIntervalSummary] {
-        var intervals = persistedIntervals.filter { !$0.isOpen }
+        var intervals = persistedIntervals
         if let liveInterval = timerService.liveIntervalForDay(day) {
             intervals.append(liveInterval)
         }
-        return intervals.sorted { $0.start < $1.start }
+        return intervals
     }
 
     private var displayedTotal: TimeInterval {
@@ -50,13 +50,19 @@ struct DayDetailView: View {
         }
         .padding()
         .task(id: day) { await refreshPersistedData() }
-        .onReceive(NotificationCenter.default.publisher(for: .activeTrackPersistenceDidChange)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .activeTrackPersistenceDidChange)) { notification in
+            guard let change = notification.object as? PersistenceChange else {
+                Task { await refreshPersistedData() }
+                return
+            }
+            guard change.affects(day: day) else { return }
             Task { await refreshPersistedData() }
         }
     }
 
     private func refreshPersistedData() async {
-        persistedIntervals = await persistenceService.intervalSummariesForDayAsync(day)
+        persistedIntervals = (await persistenceService.intervalSummariesForDayAsync(day))
+            .filter { !$0.isOpen }
     }
 }
 

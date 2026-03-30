@@ -19,6 +19,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     private var statusItem: NSStatusItem
     private var popover: NSPopover
+    private let popoverViewController: NSHostingController<MenuBarPopoverView>
     private var timerStatusObserver: Any?
     private var displayTimeObserver: Any?
     private var targetReachedObserver: Any?
@@ -64,11 +65,15 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         popover = NSPopover()
+        popoverViewController = NSHostingController(
+            rootView: MenuBarPopoverView(timerService: timerService, persistenceService: persistenceService)
+        )
         super.init()
 
         popover.contentSize = NSSize(width: 280, height: 240)
         popover.behavior = .transient
         popover.delegate = self
+        popover.contentViewController = popoverViewController
 
         if let button = statusItem.button {
             button.image = Self.idleImage
@@ -177,24 +182,17 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private func showPopover() {
         guard let button = statusItem.button else { return }
 
-        if popover.contentViewController == nil {
-            popover.contentViewController = NSHostingController(
-                rootView: MenuBarPopoverView(timerService: timerService, persistenceService: persistenceService)
-            )
-        }
-
-        if let contentView = popover.contentViewController?.view {
-            contentView.layoutSubtreeIfNeeded()
-            let fittingSize = contentView.fittingSize
-            popover.contentSize = NSSize(width: 280, height: min(max(fittingSize.height, 180), 480))
-        }
+        let contentView = popoverViewController.view
+        contentView.layoutSubtreeIfNeeded()
+        let fittingSize = contentView.fittingSize
+        popover.contentSize = NSSize(width: 280, height: min(max(fittingSize.height, 180), 480))
 
         if !popover.isShown {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
 
         NSApp.activate(ignoringOtherApps: true)
-        popover.contentViewController?.view.window?.makeKey()
+        popoverViewController.view.window?.makeKey()
     }
 
     @objc private func togglePopover(_ sender: AnyObject?) {
@@ -206,7 +204,6 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     }
 
     func popoverDidClose(_ notification: Notification) {
-        popover.contentViewController = nil
     }
 }
 
