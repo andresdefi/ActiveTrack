@@ -80,6 +80,23 @@ final class TimerServiceTests: XCTestCase {
         XCTAssertFalse(timer.isRunning)
     }
 
+    func testLiveIntervalForTodayReflectsRunningSession() {
+        timer.start()
+        waitFor(1.1)
+
+        let liveInterval = timer.liveIntervalForDay(.now)
+        XCTAssertNotNil(liveInterval)
+        XCTAssertTrue(liveInterval?.isOpen == true)
+        XCTAssertGreaterThan(liveInterval?.duration ?? 0, 0.5)
+    }
+
+    func testLiveIntervalForOtherDayIsNilForTodaySession() {
+        timer.start()
+        let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: .now)!
+
+        XCTAssertNil(timer.liveIntervalForDay(yesterday))
+    }
+
     func testStartCreatesOpenInterval() {
         timer.start()
         let open = persistence.fetchOpenInterval()

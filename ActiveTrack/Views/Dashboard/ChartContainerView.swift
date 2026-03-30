@@ -19,9 +19,18 @@ struct ChartContainerView: View {
     @State private var persistedDailyData: [DailyTotal] = []
     @State private var persistedWeeklyData: [WeeklyTotal] = []
     @State private var persistedMonthlyData: [MonthlyTotal] = []
-    @State private var dailyData: [DailyTotal] = []
-    @State private var weeklyData: [WeeklyTotal] = []
-    @State private var monthlyData: [MonthlyTotal] = []
+
+    private var displayedDailyData: [DailyTotal] {
+        overlayDailyTotals(persistedDailyData)
+    }
+
+    private var displayedWeeklyData: [WeeklyTotal] {
+        overlayWeeklyTotals(persistedWeeklyData)
+    }
+
+    private var displayedMonthlyData: [MonthlyTotal] {
+        overlayMonthlyTotals(persistedMonthlyData)
+    }
 
     var body: some View {
         ScrollView {
@@ -48,38 +57,33 @@ struct ChartContainerView: View {
                     LiveTodayDashboardMetricCard(timerService: timerService)
                     DashboardMetricCard(
                         title: "Average / Day",
-                        value: averageDuration(for: dailyData).formattedHoursMinutes,
+                        value: averageDuration(for: displayedDailyData).formattedHoursMinutes,
                         caption: "Across the last 14 days"
                     )
                     DashboardMetricCard(
                         title: "Average / Week",
-                        value: averageDuration(for: weeklyData).formattedHoursMinutes,
+                        value: averageDuration(for: displayedWeeklyData).formattedHoursMinutes,
                         caption: "Across the last 12 weeks"
                     )
                     DashboardMetricCard(
                         title: "Average / Month",
-                        value: averageDuration(for: monthlyData).formattedHoursMinutes,
+                        value: averageDuration(for: displayedMonthlyData).formattedHoursMinutes,
                         caption: "Across the last 12 months"
                     )
                 }
 
                 switch selectedPeriod {
                 case .daily:
-                    DailyChartView(data: dailyData)
+                    DailyChartView(data: displayedDailyData)
                 case .weekly:
-                    WeeklyChartView(data: weeklyData, metric: aggregateMetric)
+                    WeeklyChartView(data: displayedWeeklyData, metric: aggregateMetric)
                 case .monthly:
-                    MonthlyChartView(data: monthlyData, metric: aggregateMetric)
+                    MonthlyChartView(data: displayedMonthlyData, metric: aggregateMetric)
                 }
             }
         }
         .padding()
         .task { await reloadPersistedData() }
-        .onChange(of: timerService.isRunning) { applyRunningOverlay() }
-        .onReceive(NotificationCenter.default.publisher(for: .activeTrackDisplayTimeChanged)) { _ in
-            guard timerService.isRunning else { return }
-            applyRunningOverlay()
-        }
         .onReceive(NotificationCenter.default.publisher(for: .activeTrackPersistenceDidChange)) { _ in
             Task { await reloadPersistedData() }
         }
@@ -90,41 +94,59 @@ struct ChartContainerView: View {
         persistedDailyData = chartData.daily
         persistedWeeklyData = chartData.weekly
         persistedMonthlyData = chartData.monthly
-        applyRunningOverlay()
     }
 
-    private func applyRunningOverlay() {
-        dailyData = persistedDailyData
-        weeklyData = persistedWeeklyData
-        monthlyData = persistedMonthlyData
+    private func overlayDailyTotals(_ items: [DailyTotal]) -> [DailyTotal] {
+        let runningElapsed = liveOverlayDuration
+        guard runningElapsed > 0 else { return items }
+        let today = Calendar.current.startOfDay(for: .now)
+        if let dailyIndex = items.firstIndex(where: { $0.date == today }) {
+            var updated = items
+            updated[dailyIndex] = DailyTotal(date: today, duration: updated[dailyIndex].duration + runningElapsed)
+            return updated
+        }
+        return items
+    }
 
-        guard timerService.isRunning else { return }
-        let runningElapsed = timerService.currentIntervalElapsed
-        guard runningElapsed > 0 else { return }
+    private func overlayWeeklyTotals(_ items: [WeeklyTotal]) -> [WeeklyTotal] {
+        let runningElapsed = liveOverlayDuration
+        guard runningElapsed > 0 else { return items }
 
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: .now)
-        if let dailyIndex = dailyData.firstIndex(where: { $0.date == today }) {
-            dailyData[dailyIndex] = DailyTotal(date: today, duration: dailyData[dailyIndex].duration + runningElapsed)
-        }
-
-        let weekStart = calendar.date(
-            from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: today)
-        )
-        if let weekStart, let weeklyIndex = weeklyData.firstIndex(where: { $0.weekStart == weekStart }) {
-            weeklyData[weeklyIndex] = WeeklyTotal(
+        let weekStart = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: today))
+        if let weekStart, let weeklyIndex = items.firstIndex(where: { $0.weekStart == weekStart }) {
+            var updated = items
+            updated[weeklyIndex] = WeeklyTotal(
                 weekStart: weekStart,
-                duration: weeklyData[weeklyIndex].duration + runningElapsed
+                duration: updated[weeklyIndex].duration + runningElapsed
             )
+            return updated
         }
+        return items
+    }
 
+    private func overlayMonthlyTotals(_ items: [MonthlyTotal]) -> [MonthlyTotal] {
+        let runningElapsed = liveOverlayDuration
+        guard runningElapsed > 0 else { return items }
+
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
         let monthStart = calendar.date(from: calendar.dateComponents([.year, .month], from: today))
-        if let monthStart, let monthlyIndex = monthlyData.firstIndex(where: { $0.monthStart == monthStart }) {
-            monthlyData[monthlyIndex] = MonthlyTotal(
+        if let monthStart, let monthlyIndex = items.firstIndex(where: { $0.monthStart == monthStart }) {
+            var updated = items
+            updated[monthlyIndex] = MonthlyTotal(
                 monthStart: monthStart,
-                duration: monthlyData[monthlyIndex].duration + runningElapsed
+                duration: updated[monthlyIndex].duration + runningElapsed
             )
+            return updated
         }
+        return items
+    }
+
+    private var liveOverlayDuration: TimeInterval {
+        guard timerService.isRunning else { return 0 }
+        return timerService.currentIntervalElapsed
     }
 
     private func averageDuration<T>(for items: [T]) -> TimeInterval where T: DurationReadable {

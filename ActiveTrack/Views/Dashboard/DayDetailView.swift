@@ -5,15 +5,26 @@ struct DayDetailView: View {
     let timerService: TimerService
     let persistenceService: PersistenceService
 
-    @State private var intervals: [(start: Date, end: Date, duration: TimeInterval)] = []
-    @State private var total: TimeInterval = 0
+    @State private var persistedIntervals: [DayIntervalSummary] = []
+
+    private var displayedIntervals: [DayIntervalSummary] {
+        var intervals = persistedIntervals.filter { !$0.isOpen }
+        if let liveInterval = timerService.liveIntervalForDay(day) {
+            intervals.append(liveInterval)
+        }
+        return intervals.sorted { $0.start < $1.start }
+    }
+
+    private var displayedTotal: TimeInterval {
+        displayedIntervals.reduce(0) { $0 + $1.duration }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            LiveDayHeader(day: day, total: total)
+            LiveDayHeader(day: day, total: displayedTotal)
                 .padding(.bottom, 8)
 
-            if intervals.isEmpty {
+            if displayedIntervals.isEmpty {
                 ContentUnavailableView {
                     Label("No Intervals", systemImage: "clock")
                 } description: {
@@ -21,7 +32,7 @@ struct DayDetailView: View {
                 }
             } else {
                 List {
-                    ForEach(Array(intervals.enumerated()), id: \.offset) { _, interval in
+                    ForEach(displayedIntervals) { interval in
                         HStack {
                             VStack(alignment: .leading) {
                                 Text("\(interval.start.timeString) – \(interval.end.timeString)")
@@ -38,24 +49,14 @@ struct DayDetailView: View {
             }
         }
         .padding()
-        .task(id: day) { await refreshData() }
-        .onChange(of: timerService.isRunning) {
-            guard Calendar.current.isDateInToday(day) else { return }
-            Task { await refreshData() }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .activeTrackDisplayTimeChanged)) { _ in
-            guard timerService.isRunning, Calendar.current.isDateInToday(day) else { return }
-            Task { await refreshData() }
-        }
+        .task(id: day) { await refreshPersistedData() }
         .onReceive(NotificationCenter.default.publisher(for: .activeTrackPersistenceDidChange)) { _ in
-            Task { await refreshData() }
+            Task { await refreshPersistedData() }
         }
     }
 
-    private func refreshData() async {
-        let dayIntervals = await persistenceService.intervalsForDayAsync(day)
-        intervals = dayIntervals
-        total = dayIntervals.reduce(0) { $0 + $1.duration }
+    private func refreshPersistedData() async {
+        persistedIntervals = await persistenceService.intervalSummariesForDayAsync(day)
     }
 }
 

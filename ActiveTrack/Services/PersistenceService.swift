@@ -39,10 +39,15 @@ struct HistoryChartData: Sendable {
     let monthly: [MonthlyTotal]
 }
 
-struct DayIntervalSummary: Sendable, Hashable {
+struct DayIntervalSummary: Identifiable, Sendable, Hashable {
     let start: Date
     let end: Date
     let duration: TimeInterval
+    let isOpen: Bool
+
+    var id: String {
+        "\(isOpen ? "open" : "closed")-\(start.timeIntervalSinceReferenceDate)"
+    }
 }
 
 private struct IntervalSnapshot: Sendable {
@@ -88,6 +93,25 @@ private func aggregatedClosedDayDurations(from snapshots: [IntervalSnapshot]) ->
     }
 
     return dayDurations
+}
+
+private func dayIntervalSummaries(
+    from snapshots: [IntervalSnapshot],
+    dayStart: Date,
+    dayEnd: Date
+) -> [DayIntervalSummary] {
+    snapshots.compactMap { snapshot in
+        let effectiveStart = max(snapshot.startDate, dayStart)
+        let effectiveEnd = min(snapshot.endDate ?? .now, dayEnd)
+        let duration = max(0, effectiveEnd.timeIntervalSince(effectiveStart))
+        guard duration > 0 else { return nil }
+        return DayIntervalSummary(
+            start: effectiveStart,
+            end: effectiveEnd,
+            duration: duration,
+            isOpen: snapshot.endDate == nil
+        )
+    }
 }
 
 private final class SQLiteReadConnection {
@@ -277,13 +301,7 @@ private actor SQLiteAsyncReader {
         guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return [] }
 
         let snapshots = connection.readSnapshots(rangeStart: dayStart, rangeEnd: dayEnd)
-        return snapshots.compactMap { snapshot in
-            let effectiveStart = max(snapshot.startDate, dayStart)
-            let effectiveEnd = min(snapshot.endDate ?? .now, dayEnd)
-            let duration = max(0, effectiveEnd.timeIntervalSince(effectiveStart))
-            guard duration > 0 else { return nil }
-            return DayIntervalSummary(start: effectiveStart, end: effectiveEnd, duration: duration)
-        }
+        return dayIntervalSummaries(from: snapshots, dayStart: dayStart, dayEnd: dayEnd)
     }
 }
 
@@ -299,10 +317,12 @@ final class PersistenceService {
     private let databaseURL: URL?
     private let readConnection: SQLiteReadConnection?
     private let asyncReader: SQLiteAsyncReader?
+    private var writeConnection: OpaquePointer?
     private(set) var startupWarning: String?
     private var cachedDaySummaryDurations: [Date: TimeInterval]?
     private var isDaySummaryReady = true
     private var isPreparingDaySummary = false
+    private var hasEnsuredWritableSchema = false
 
     init(modelContext: ModelContext, storeURL: URL? = nil) {
         self.modelContext = modelContext
@@ -314,6 +334,14 @@ final class PersistenceService {
         self.isDaySummaryReady = startupCheck.isDaySummaryReady
         if storeURL != nil, !startupCheck.isDaySummaryReady {
             scheduleDaySummaryPreparation()
+        }
+    }
+
+    deinit {
+        MainActor.assumeIsolated {
+            if let writeConnection {
+                sqlite3_close(writeConnection)
+            }
         }
     }
 
@@ -585,18 +613,8 @@ final class PersistenceService {
     }
 
     func intervalsForDay(_ date: Date) -> [(start: Date, end: Date, duration: TimeInterval)] {
-        let calendar = Calendar.current
-        let dayStart = calendar.startOfDay(for: date)
-        let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart)!
-
-        let snapshots = fetchSnapshotsOverlapping(start: dayStart, end: dayEnd)
-        return snapshots.compactMap { snapshot in
-            let effectiveStart = max(snapshot.startDate, dayStart)
-            let effectiveEnd = min(snapshot.endDate ?? .now, dayEnd)
-            let duration = max(0, effectiveEnd.timeIntervalSince(effectiveStart))
-            guard duration > 0 else { return nil }
-            return (start: effectiveStart, end: effectiveEnd, duration: duration)
-        }
+        intervalSummariesForDay(date)
+            .map { (start: $0.start, end: $0.end, duration: $0.duration) }
     }
 
     func daysWithData() -> [Date] {
@@ -637,8 +655,25 @@ final class PersistenceService {
             return intervalsForDay(date)
         }
 
-        let intervals = await asyncReader?.intervalsForDay(date) ?? []
+        let intervals = await intervalSummariesForDayAsync(date)
         return intervals.map { (start: $0.start, end: $0.end, duration: $0.duration) }
+    }
+
+    func intervalSummariesForDay(_ date: Date) -> [DayIntervalSummary] {
+        let calendar = Calendar.current
+        let dayStart = calendar.startOfDay(for: date)
+        let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart)!
+
+        let snapshots = fetchSnapshotsOverlapping(start: dayStart, end: dayEnd)
+        return dayIntervalSummaries(from: snapshots, dayStart: dayStart, dayEnd: dayEnd)
+    }
+
+    func intervalSummariesForDayAsync(_ date: Date) async -> [DayIntervalSummary] {
+        guard databaseURL != nil else {
+            return intervalSummariesForDay(date)
+        }
+
+        return await asyncReader?.intervalsForDay(date) ?? []
     }
 
     // MARK: - Private Helpers
@@ -995,16 +1030,12 @@ final class PersistenceService {
             throw SQLitePersistenceFailure.openFailed("No sqlite store configured")
         }
 
-        var db: OpaquePointer?
-        guard sqlite3_open_v2(databaseURL.path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK else {
-            let message = db.flatMap { sqliteMessage(db: $0) } ?? "Failed to open sqlite store"
-            if let db { sqlite3_close(db) }
-            throw SQLitePersistenceFailure.openFailed(message)
-        }
-        defer { sqlite3_close(db) }
+        let db = try ensureWritableStoreOpen(databaseURL: databaseURL)
 
-        sqlite3_busy_timeout(db, 1000)
-        try ensureSchema(db: db)
+        if !hasEnsuredWritableSchema {
+            try ensureSchema(db: db)
+            hasEnsuredWritableSchema = true
+        }
         do {
             _ = try executeUpdate(db: db, sql: "BEGIN IMMEDIATE")
             try work(db)
@@ -1013,6 +1044,25 @@ final class PersistenceService {
             _ = try? executeUpdate(db: db, sql: "ROLLBACK")
             throw error
         }
+    }
+
+    private func ensureWritableStoreOpen(databaseURL: URL) throws -> OpaquePointer? {
+        if let writeConnection {
+            return writeConnection
+        }
+
+        var opened: OpaquePointer?
+        guard sqlite3_open_v2(databaseURL.path, &opened, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK else {
+            let message = opened.flatMap { sqliteMessage(db: $0) } ?? "Failed to open sqlite store"
+            if let opened {
+                sqlite3_close(opened)
+            }
+            throw SQLitePersistenceFailure.openFailed(message)
+        }
+
+        sqlite3_busy_timeout(opened, 1000)
+        writeConnection = opened
+        return opened
     }
 
     private func executeUpdate(

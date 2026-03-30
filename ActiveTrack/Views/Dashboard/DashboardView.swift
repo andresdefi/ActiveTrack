@@ -19,11 +19,14 @@ struct DashboardView: View {
     let timerService: TimerService
     let persistenceService: PersistenceService
     @State private var selectedItem: DashboardSelection = .overview
-    @State private var monthSections: [DashboardMonthSection] = []
     @State private var expandedMonths: Set<Date> = []
     @State private var persistedDayDurations: [Date: TimeInterval] = [:]
-    @State private var dayDurations: [Date: TimeInterval] = [:]
+    @State private var persistedMonthSections: [DashboardMonthSection] = []
     @State private var splitVisibility: NavigationSplitViewVisibility = .all
+
+    private var displayedMonthSections: [DashboardMonthSection] {
+        applyLiveTodayOverlay(to: persistedMonthSections)
+    }
 
     var body: some View {
         if timerService.isDashboardSafeMode {
@@ -57,13 +60,6 @@ struct DashboardView: View {
         .onAppear {
             Task { await reloadHistory() }
         }
-        .onChange(of: timerService.isRunning) {
-            applyLiveTodayOverlay()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .activeTrackDisplayTimeChanged)) { _ in
-            guard timerService.isRunning else { return }
-            applyLiveTodayOverlay()
-        }
         .onReceive(NotificationCenter.default.publisher(for: .activeTrackPersistenceDidChange)) { _ in
             Task { await reloadHistory() }
         }
@@ -85,7 +81,7 @@ struct DashboardView: View {
                     showOverview()
                 }
 
-                if monthSections.isEmpty {
+                if displayedMonthSections.isEmpty {
                     ContentUnavailableView {
                         Label("No Data Yet", systemImage: "clock")
                     } description: {
@@ -93,7 +89,7 @@ struct DashboardView: View {
                     }
                     .frame(maxWidth: .infinity, minHeight: 160)
                 } else {
-                    ForEach(monthSections) { section in
+                    ForEach(displayedMonthSections) { section in
                         DisclosureGroup(
                             isExpanded: Binding(
                                 get: { expandedMonths.contains(section.id) },
@@ -147,36 +143,12 @@ struct DashboardView: View {
     }
 
     private func reloadHistory() async {
-        persistedDayDurations = await persistenceService.allDayDurationsAsync()
-        let durations = displayedDurations()
-        dayDurations = durations
-        rebuildMonthSections(using: durations)
-    }
+        let durations = await persistenceService.allDayDurationsAsync()
+        persistedDayDurations = durations
+        let monthSections = buildMonthSections(from: durations.keys.sorted(by: >), durations: durations)
+        persistedMonthSections = monthSections
 
-    private func applyLiveTodayOverlay() {
-        let durations = displayedDurations()
-        dayDurations = durations
-        updateCurrentMonthSection(using: durations)
-    }
-
-    private func displayedDurations() -> [Date: TimeInterval] {
-        var durations = persistedDayDurations
-        let today = Calendar.current.startOfDay(for: .now)
-        let liveDuration = timerService.isRunning ? timerService.currentIntervalElapsed : 0
-        let total = (durations[today] ?? 0) + liveDuration
-        if total > 0.000_001 {
-            durations[today] = total
-        } else {
-            durations.removeValue(forKey: today)
-        }
-        return durations
-    }
-
-    private func rebuildMonthSections(using durations: [Date: TimeInterval]) {
-        let days = durations.keys.sorted(by: >)
-        monthSections = buildMonthSections(from: days, durations: durations)
-
-        var expanded = expandedMonths.intersection(Set(monthSections.map(\.id)))
+        var expanded = expandedMonths.intersection(Set(displayedMonthSections.map(\.id)))
         if case .day(let selectedDay) = selectedItem,
            let selectedMonth = Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: selectedDay)) {
             expanded.insert(selectedMonth)
@@ -184,26 +156,36 @@ struct DashboardView: View {
         expandedMonths = expanded
     }
 
-    private func updateCurrentMonthSection(using durations: [Date: TimeInterval]) {
+    private func applyLiveTodayOverlay(to sections: [DashboardMonthSection]) -> [DashboardMonthSection] {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: .now)
         guard let currentMonth = calendar.date(from: calendar.dateComponents([.year, .month], from: today)) else {
-            return
+            return sections
         }
 
-        let monthDays = durations.keys
-            .filter { day in
-                calendar.date(from: calendar.dateComponents([.year, .month], from: day)) == currentMonth
+        var overlaidSections = sections
+        let liveDuration = timerService.isRunning ? timerService.currentIntervalElapsed : 0
+        let todayTotal = (persistedDayDurations[today] ?? 0) + liveDuration
+
+        let persistedSection = sections.first(where: { $0.id == currentMonth })
+        var monthDays = persistedSection?.days ?? []
+        if todayTotal > 0.000_001 {
+            if !monthDays.contains(today) {
+                monthDays.append(today)
+                monthDays.sort(by: >)
             }
-            .sorted(by: >)
+        } else {
+            monthDays.removeAll { $0 == today }
+        }
 
         if monthDays.isEmpty {
-            monthSections.removeAll { $0.id == currentMonth }
-            expandedMonths.remove(currentMonth)
-            return
+            overlaidSections.removeAll { $0.id == currentMonth }
+            return overlaidSections
         }
 
-        let total = monthDays.reduce(0) { $0 + (durations[$1] ?? 0) }
+        let total = monthDays.reduce(0) { partial, day in
+            partial + (day == today ? todayTotal : (persistedDayDurations[day] ?? 0))
+        }
         let updatedSection = DashboardMonthSection(
             monthStart: currentMonth,
             title: currentMonth.monthYearString,
@@ -211,16 +193,21 @@ struct DashboardView: View {
             days: monthDays
         )
 
-        if let sectionIndex = monthSections.firstIndex(where: { $0.id == currentMonth }) {
-            monthSections[sectionIndex] = updatedSection
+        if let sectionIndex = overlaidSections.firstIndex(where: { $0.id == currentMonth }) {
+            overlaidSections[sectionIndex] = updatedSection
         } else {
-            monthSections.append(updatedSection)
-            monthSections.sort { $0.monthStart > $1.monthStart }
+            overlaidSections.append(updatedSection)
+            overlaidSections.sort { $0.monthStart > $1.monthStart }
         }
+
+        return overlaidSections
     }
 
     private func durationForDay(_ day: Date) -> TimeInterval {
-        dayDurations[day] ?? 0
+        let persistedDuration = persistedDayDurations[day] ?? 0
+        guard Calendar.current.isDateInToday(day) else { return persistedDuration }
+        let liveDuration = timerService.isRunning ? timerService.currentIntervalElapsed : 0
+        return persistedDuration + liveDuration
     }
 
     private func buildMonthSections(from days: [Date], durations: [Date: TimeInterval]) -> [DashboardMonthSection] {

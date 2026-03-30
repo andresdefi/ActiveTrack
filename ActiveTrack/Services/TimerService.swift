@@ -287,6 +287,26 @@ final class TimerService {
         refreshTargetDeadline()
     }
 
+    func liveIntervalForDay(_ day: Date) -> DayIntervalSummary? {
+        guard isRunning, let startDate = currentIntervalStartDate else { return nil }
+
+        let calendar = Calendar.current
+        let dayStart = calendar.startOfDay(for: day)
+        guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return nil }
+
+        let effectiveStart = max(startDate, dayStart)
+        let effectiveEnd = min(Date.now, dayEnd)
+        let duration = max(0, effectiveEnd.timeIntervalSince(effectiveStart))
+        guard duration > 0 else { return nil }
+
+        return DayIntervalSummary(
+            start: effectiveStart,
+            end: effectiveEnd,
+            duration: duration,
+            isOpen: true
+        )
+    }
+
     func setTarget(duration: TimeInterval, mode: TimerTargetMode) {
         let normalizedDuration = max(duration, 0)
         guard normalizedDuration > 0 else {

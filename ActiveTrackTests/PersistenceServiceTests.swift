@@ -185,6 +185,22 @@ final class PersistenceServiceTests: XCTestCase {
         XCTAssertEqual(intervals[1].duration, 5400, accuracy: 2)
     }
 
+    func testIntervalSummariesForDayMarksOpenIntervals() {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+
+        let closedStart = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: today)!
+        let closedEnd = calendar.date(bySettingHour: 10, minute: 0, second: 0, of: today)!
+        context.insert(ActiveInterval(startDate: closedStart, endDate: closedEnd))
+        context.insert(ActiveInterval(startDate: Date.now.addingTimeInterval(-1800)))
+        try! context.save()
+
+        let summaries = service.intervalSummariesForDay(today)
+        XCTAssertEqual(summaries.count, 2)
+        XCTAssertEqual(summaries.filter(\.isOpen).count, 1)
+        XCTAssertEqual(summaries.filter { !$0.isOpen }.count, 1)
+    }
+
     func testDaysWithData() {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: .now)
