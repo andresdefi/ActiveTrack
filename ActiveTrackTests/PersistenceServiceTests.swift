@@ -55,6 +55,29 @@ final class PersistenceServiceTests: XCTestCase {
         XCTAssertEqual(countAfter, countBefore - 1)
     }
 
+    func testDeleteIntervalMatchingSummaryRemovesSpanningInterval() throws {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today)!
+        let start = calendar.date(bySettingHour: 23, minute: 0, second: 0, of: yesterday)!
+        let end = calendar.date(bySettingHour: 2, minute: 0, second: 0, of: today)!
+
+        context.insert(ActiveInterval(startDate: start, endDate: end))
+        try context.save()
+
+        let summary = try XCTUnwrap(service.intervalSummariesForDay(today).first)
+        XCTAssertEqual(summary.start, today)
+        XCTAssertEqual(summary.end, end)
+        XCTAssertEqual(summary.sourceStart, start)
+        XCTAssertEqual(summary.sourceEnd, end)
+
+        try service.deleteInterval(matching: summary)
+
+        XCTAssertTrue(service.fetchAllIntervals().isEmpty)
+        XCTAssertEqual(service.durationForDay(yesterday), 0, accuracy: 1)
+        XCTAssertEqual(service.durationForDay(today), 0, accuracy: 1)
+    }
+
     // MARK: - Save Propagation
 
     func testCreateIntervalDoesNotThrow() {
@@ -621,6 +644,28 @@ final class PersistenceServiceTests: XCTestCase {
         XCTAssertTrue(sqliteService.daysWithData().isEmpty)
     }
 
+    func testSQLiteDeleteIntervalMatchingSummaryRemovesSpanningInterval() throws {
+        let (sqliteService, _, directory) = try makeSQLiteService()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today)!
+        let start = calendar.date(bySettingHour: 23, minute: 0, second: 0, of: yesterday)!
+        let end = calendar.date(bySettingHour: 2, minute: 0, second: 0, of: today)!
+
+        let interval = try sqliteService.createInterval(startDate: start)
+        try sqliteService.closeInterval(interval, endDate: end)
+
+        let summary = try XCTUnwrap(awaitValue { await sqliteService.intervalSummariesForDayAsync(today) }.first)
+
+        try sqliteService.deleteInterval(matching: summary)
+
+        XCTAssertTrue(sqliteService.fetchAllIntervals().isEmpty)
+        XCTAssertEqual(sqliteService.durationForDay(yesterday), 0, accuracy: 1)
+        XCTAssertEqual(sqliteService.durationForDay(today), 0, accuracy: 1)
+    }
+
     func testSQLiteResetTodayClearsTodaySummaryButPreservesEarlierDays() throws {
         let (sqliteService, _, directory) = try makeSQLiteService()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -694,6 +739,17 @@ final class PersistenceServiceTests: XCTestCase {
         let storeURL = directory.appendingPathComponent("Persistence.store")
         let sqliteService = PersistenceService(modelContext: context, storeURL: storeURL)
         return (sqliteService, storeURL, directory)
+    }
+
+    private func awaitValue<T>(_ operation: @escaping () async -> T) -> T {
+        let expectation = expectation(description: "await value")
+        var result: T?
+        Task {
+            result = await operation()
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 2.0)
+        return result!
     }
 
     private func readDaySummaryRows(at storeURL: URL) throws -> [Date: TimeInterval] {

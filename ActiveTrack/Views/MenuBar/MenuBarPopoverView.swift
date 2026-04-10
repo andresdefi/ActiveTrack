@@ -7,7 +7,7 @@ struct MenuBarPopoverView: View {
     @Environment(\.openWindow) private var openWindow
     @AppStorage("lastSeenReleaseNotesVersion") private var lastSeenReleaseNotesVersion = ""
     @State private var showingWhatsNew = false
-    private let currentReleaseNotesVersion = "1.2.7"
+    private let currentReleaseNotesVersion = "1.2.8"
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
@@ -88,8 +88,6 @@ struct MenuBarPopoverView: View {
                     Spacer()
 
                     Button("Quit") {
-                        timerService.pause()
-                        HealthLog.event("app_quit")
                         NSApp.terminate(nil)
                     }
                     .buttonStyle(.link)
@@ -121,11 +119,10 @@ struct MenuBarPopoverView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("What's New in \(currentReleaseNotesVersion)")
                 .font(.title3.bold())
-            Text("• Moved the dashboard to a shared history store so charts and sidebar reuse one persisted snapshot")
-            Text("• Changed persistence notifications to carry affected days, letting screens patch only what changed")
-            Text("• Moved the full SQLite integrity check off the cold-start path to keep launch work lighter")
-            Text("• Narrowed live dashboard recomputation so timer ticks update smaller UI surfaces")
-            Text("• Reused the menu bar popover host instead of rebuilding the SwiftUI tree on each open")
+            Text("• Quitting now cancels cleanly if ActiveTrack can't save a running timer, instead of risking a dirty exit")
+            Text("• Day detail totals now refresh live while today's timer is running")
+            Text("• Added interval-level deletion from the day detail screen, including correct handling for midnight-spanning sessions")
+            Text("• Added regression coverage for the new quit safety and interval deletion flows")
             HStack {
                 Spacer()
                 Button("Done") {

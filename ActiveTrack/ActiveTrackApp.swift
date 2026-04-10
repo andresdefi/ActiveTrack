@@ -5,6 +5,13 @@ import os.log
 
 private let logger_app = Logger(subsystem: "com.activetrack.app", category: "App")
 
+@MainActor
+private final class AppTerminationCoordinator {
+    static let shared = AppTerminationCoordinator()
+
+    weak var timerService: TimerService?
+}
+
 // MARK: - AppKit Status Bar Controller
 
 /// Manages the NSStatusItem directly via AppKit, bypassing MenuBarExtra's
@@ -209,7 +216,26 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
 // MARK: - App
 
+@MainActor
 final class ActiveTrackAppDelegate: NSObject, NSApplicationDelegate {
+    private let terminationAttempt: () -> (shouldTerminate: Bool, error: PersistenceError?)
+    private let blockedAlertPresenter: (PersistenceError?) -> Void
+
+    override init() {
+        self.terminationAttempt = Self.defaultTerminationAttempt
+        self.blockedAlertPresenter = Self.presentTerminationBlockedAlert
+        super.init()
+    }
+
+    init(
+        terminationAttempt: @escaping () -> (shouldTerminate: Bool, error: PersistenceError?),
+        blockedAlertPresenter: @escaping (PersistenceError?) -> Void = { _ in }
+    ) {
+        self.terminationAttempt = terminationAttempt
+        self.blockedAlertPresenter = blockedAlertPresenter
+        super.init()
+    }
+
     func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
         false
     }
@@ -217,6 +243,52 @@ final class ActiveTrackAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let termination = terminationAttempt()
+        guard termination.shouldTerminate else {
+            HealthLog.event(
+                "app_quit_blocked",
+                metadata: ["error": Self.terminationErrorMessage(termination.error)]
+            )
+            blockedAlertPresenter(termination.error)
+            return .terminateCancel
+        }
+
+        HealthLog.event("app_quit")
+        return .terminateNow
+    }
+
+    private static func defaultTerminationAttempt() -> (shouldTerminate: Bool, error: PersistenceError?) {
+        guard let timerService = AppTerminationCoordinator.shared.timerService else {
+            return (true, nil)
+        }
+
+        let shouldTerminate = timerService.prepareForTermination()
+        return (shouldTerminate, timerService.lastError)
+    }
+
+    private static func presentTerminationBlockedAlert(error: PersistenceError?) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "ActiveTrack couldn't save your running timer before quitting."
+        alert.informativeText = "The app is staying open so you can retry without losing tracked time.\n\n\(terminationErrorMessage(error))"
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+
+    private static func terminationErrorMessage(_ error: PersistenceError?) -> String {
+        guard let error else {
+            return "Unknown persistence error."
+        }
+
+        switch error {
+        case .saveFailed(let underlying):
+            return underlying
+        }
+    }
+
 }
 
 @main
@@ -271,6 +343,7 @@ struct ActiveTrackApp: App {
             HealthLog.event("startup_warning", metadata: ["message": startupWarning])
         }
         let timer = TimerService(persistenceService: persistence)
+        AppTerminationCoordinator.shared.timerService = timer
 
         self._timerService = State(initialValue: timer)
         self._persistenceService = State(initialValue: persistence)

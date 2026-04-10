@@ -75,9 +75,15 @@ struct DayIntervalSummary: Identifiable, Sendable, Hashable {
     let end: Date
     let duration: TimeInterval
     let isOpen: Bool
+    let sourceStart: Date
+    let sourceEnd: Date?
 
     var id: String {
-        "\(isOpen ? "open" : "closed")-\(start.timeIntervalSinceReferenceDate)"
+        [
+            isOpen ? "open" : "closed",
+            String(sourceStart.timeIntervalSinceReferenceDate),
+            String(start.timeIntervalSinceReferenceDate)
+        ].joined(separator: "-")
     }
 }
 
@@ -140,7 +146,9 @@ private func dayIntervalSummaries(
             start: effectiveStart,
             end: effectiveEnd,
             duration: duration,
-            isOpen: snapshot.endDate == nil
+            isOpen: snapshot.endDate == nil,
+            sourceStart: snapshot.startDate,
+            sourceEnd: snapshot.endDate
         )
     }
 }
@@ -488,6 +496,53 @@ final class PersistenceService {
                 if let endDate = intervalRecord.endDate {
                     try applyDaySummaryDelta(startDate: intervalRecord.startDate, endDate: endDate, multiplier: -1, db: db)
                 }
+                try syncPrimaryKey(db: db)
+            }
+            invalidateDaySummaryCache()
+            if !changedDays.isEmpty {
+                notifyPersistenceDidChange(PersistenceChange(kind: .dayDurationsChanged, affectedDays: changedDays))
+            }
+        } catch {
+            throw PersistenceError.saveFailed(underlying: String(describing: error))
+        }
+    }
+
+    func deleteInterval(matching summary: DayIntervalSummary) throws {
+        guard !summary.isOpen, let sourceEnd = summary.sourceEnd else { return }
+
+        guard databaseURL != nil else {
+            guard let interval = fetchAllIntervals().first(where: { interval in
+                abs(interval.startDate.timeIntervalSince(summary.sourceStart)) < 0.001 &&
+                abs((interval.endDate ?? .distantPast).timeIntervalSince(sourceEnd)) < 0.001
+            }) else {
+                return
+            }
+            try deleteInterval(interval)
+            return
+        }
+
+        do {
+            var changedDays: Set<Date> = []
+            try withWritableStore { db in
+                guard let intervalRecord = try readIntervalRecord(
+                    db: db,
+                    matchingStartDate: summary.sourceStart,
+                    matchingEndDate: sourceEnd
+                ) else {
+                    return
+                }
+                changedDays = affectedDays(from: intervalRecord.startDate, to: intervalRecord.endDate)
+                _ = try executeUpdate(
+                    db: db,
+                    sql: """
+                    DELETE FROM ZACTIVEINTERVAL
+                    WHERE Z_PK = ?1
+                    """,
+                    bind: { statement in
+                        sqlite3_bind_int64(statement, 1, intervalRecord.primaryKey)
+                    }
+                )
+                try applyDaySummaryDelta(startDate: intervalRecord.startDate, endDate: sourceEnd, multiplier: -1, db: db)
                 try syncPrimaryKey(db: db)
             }
             invalidateDaySummaryCache()
@@ -951,6 +1006,28 @@ final class PersistenceService {
             """
         ) { statement in
             sqlite3_bind_double(statement, 1, matchingStartDate.timeIntervalSinceReferenceDate)
+        }
+    }
+
+    private func readIntervalRecord(
+        db: OpaquePointer?,
+        matchingStartDate: Date,
+        matchingEndDate: Date
+    ) throws -> IntervalRecord? {
+        try readIntervalRecord(
+            db: db,
+            sql: """
+            SELECT Z_PK, ZSTARTDATE, ZENDDATE
+            FROM ZACTIVEINTERVAL
+            WHERE ABS(ZSTARTDATE - ?1) < 0.001
+              AND ZENDDATE IS NOT NULL
+              AND ABS(ZENDDATE - ?2) < 0.001
+            ORDER BY Z_PK DESC
+            LIMIT 1
+            """
+        ) { statement in
+            sqlite3_bind_double(statement, 1, matchingStartDate.timeIntervalSinceReferenceDate)
+            sqlite3_bind_double(statement, 2, matchingEndDate.timeIntervalSinceReferenceDate)
         }
     }
 

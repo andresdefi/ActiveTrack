@@ -80,6 +80,14 @@ final class TimerServiceTests: XCTestCase {
         XCTAssertFalse(timer.isRunning)
     }
 
+    func testPrepareForTerminationPausesRunningTimer() {
+        timer.start()
+
+        XCTAssertTrue(timer.prepareForTermination())
+        XCTAssertFalse(timer.isRunning)
+        XCTAssertNil(persistence.fetchOpenInterval())
+    }
+
     func testLiveIntervalForTodayReflectsRunningSession() {
         timer.start()
         waitFor(1.1)
@@ -972,6 +980,26 @@ final class TimerServiceTests: XCTestCase {
     func testAppDelegateDoesNotTerminateAfterLastWindowClosed() {
         let delegate = ActiveTrackAppDelegate()
         XCTAssertFalse(delegate.applicationShouldTerminateAfterLastWindowClosed(NSApplication.shared))
+    }
+
+    func testAppDelegateCancelsTerminationWhenPreparationFails() {
+        let delegate = ActiveTrackAppDelegate(
+            terminationAttempt: {
+                (false, .saveFailed(underlying: "database is locked"))
+            },
+            blockedAlertPresenter: { _ in }
+        )
+
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateCancel)
+    }
+
+    func testAppDelegateAllowsTerminationWhenPreparationSucceeds() {
+        let delegate = ActiveTrackAppDelegate(
+            terminationAttempt: { (true, nil) },
+            blockedAlertPresenter: { _ in }
+        )
+
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateNow)
     }
 
     func testSleepWakeKeepsTimerPausedAndPreservesTotal() {

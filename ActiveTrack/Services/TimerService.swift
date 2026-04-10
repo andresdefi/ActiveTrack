@@ -288,6 +288,7 @@ final class TimerService {
     }
 
     func liveIntervalForDay(_ day: Date) -> DayIntervalSummary? {
+        _ = displayRefreshVersion
         guard isRunning, let startDate = currentIntervalStartDate else { return nil }
 
         let calendar = Calendar.current
@@ -303,8 +304,16 @@ final class TimerService {
             start: effectiveStart,
             end: effectiveEnd,
             duration: duration,
-            isOpen: true
+            isOpen: true,
+            sourceStart: startDate,
+            sourceEnd: nil
         )
+    }
+
+    func prepareForTermination() -> Bool {
+        guard isRunning else { return true }
+        pause()
+        return !isRunning
     }
 
     func setTarget(duration: TimeInterval, mode: TimerTargetMode) {
