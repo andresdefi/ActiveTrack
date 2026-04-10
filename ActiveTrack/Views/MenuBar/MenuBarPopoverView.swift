@@ -7,7 +7,7 @@ struct MenuBarPopoverView: View {
     @Environment(\.openWindow) private var openWindow
     @AppStorage("lastSeenReleaseNotesVersion") private var lastSeenReleaseNotesVersion = ""
     @State private var showingWhatsNew = false
-    private let currentReleaseNotesVersion = "1.2.8"
+    private let currentReleaseNotesVersion = "1.2.9"
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
@@ -119,10 +119,10 @@ struct MenuBarPopoverView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("What's New in \(currentReleaseNotesVersion)")
                 .font(.title3.bold())
-            Text("• Quitting now cancels cleanly if ActiveTrack can't save a running timer, instead of risking a dirty exit")
-            Text("• Day detail totals now refresh live while today's timer is running")
-            Text("• Added interval-level deletion from the day detail screen, including correct handling for midnight-spanning sessions")
-            Text("• Added regression coverage for the new quit safety and interval deletion flows")
+            Text("• Hardened SQLite with WAL mode, a longer busy timeout, and connection pragmas tuned for fewer lock conflicts")
+            Text("• Dashboard history updates now patch only the affected months and skip chart rebuilds when changes are outside the visible range")
+            Text("• Added interval editing in the day detail view so logged sessions can be corrected without deleting them")
+            Text("• Added regression coverage for WAL mode, incremental dashboard updates, and interval editing")
             HStack {
                 Spacer()
                 Button("Done") {

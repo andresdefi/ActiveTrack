@@ -95,6 +95,26 @@ final class PersistenceServiceTests: XCTestCase {
         XCTAssertNoThrow(try service.deleteInterval(interval))
     }
 
+    func testUpdateIntervalMatchingSummaryAdjustsPersistedInterval() throws {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        let originalStart = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: today)!
+        let originalEnd = calendar.date(bySettingHour: 10, minute: 0, second: 0, of: today)!
+        context.insert(ActiveInterval(startDate: originalStart, endDate: originalEnd))
+        try context.save()
+
+        let summary = try XCTUnwrap(service.intervalSummariesForDay(today).first)
+        let updatedStart = calendar.date(bySettingHour: 11, minute: 15, second: 0, of: today)!
+        let updatedEnd = calendar.date(bySettingHour: 12, minute: 45, second: 0, of: today)!
+
+        try service.updateInterval(matching: summary, newStartDate: updatedStart, newEndDate: updatedEnd)
+
+        let updated = try XCTUnwrap(service.fetchAllIntervals().first)
+        XCTAssertEqual(updated.startDate, updatedStart)
+        XCTAssertEqual(updated.endDate, updatedEnd)
+        XCTAssertEqual(service.durationForDay(today), 5400, accuracy: 2)
+    }
+
     // MARK: - Daily Duration
 
     func testDurationForToday() {
@@ -332,6 +352,42 @@ final class PersistenceServiceTests: XCTestCase {
         XCTAssertEqual(snapshot.dayDurations[today] ?? 0, 3600, accuracy: 2)
         XCTAssertEqual(snapshot.dayDurations[yesterday] ?? 0, 7200, accuracy: 2)
         XCTAssertEqual(snapshot.chartData.daily.map(\.duration), service.chartData().daily.map(\.duration))
+    }
+
+    func testDashboardHistoryStoreSkipsChartChangesForOutOfRangeDayPatch() async throws {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        context.insert(
+            ActiveInterval(
+                startDate: calendar.date(bySettingHour: 9, minute: 0, second: 0, of: today)!,
+                endDate: calendar.date(bySettingHour: 10, minute: 0, second: 0, of: today)!
+            )
+        )
+        try context.save()
+
+        let store = DashboardHistoryStore(persistenceService: service)
+        await store.reload()
+
+        let beforeDaily = store.chartData.daily.map(\.duration)
+        let beforeWeekly = store.chartData.weekly.map(\.duration)
+        let beforeMonthly = store.chartData.monthly.map(\.duration)
+
+        let oldDay = calendar.date(byAdding: .month, value: -15, to: today)!
+        context.insert(
+            ActiveInterval(
+                startDate: calendar.date(bySettingHour: 13, minute: 0, second: 0, of: oldDay)!,
+                endDate: calendar.date(bySettingHour: 15, minute: 0, second: 0, of: oldDay)!
+            )
+        )
+        try context.save()
+
+        await store.apply(PersistenceChange(kind: .dayDurationsChanged, affectedDays: [oldDay]))
+
+        let oldMonthStart = try XCTUnwrap(calendar.date(from: calendar.dateComponents([.year, .month], from: oldDay)))
+        XCTAssertEqual(store.chartData.daily.map(\.duration), beforeDaily)
+        XCTAssertEqual(store.chartData.weekly.map(\.duration), beforeWeekly)
+        XCTAssertEqual(store.chartData.monthly.map(\.duration), beforeMonthly)
+        XCTAssertTrue(store.monthSections.contains { $0.monthStart == oldMonthStart })
     }
 
     func testDayDurationsAsyncForSpecificDaysReturnsOnlyRequestedDays() async throws {
@@ -642,6 +698,51 @@ final class PersistenceServiceTests: XCTestCase {
         try sqliteService.deleteInterval(interval)
         XCTAssertEqual(sqliteService.allDayDurations()[today] ?? 0, 0, accuracy: 1)
         XCTAssertTrue(sqliteService.daysWithData().isEmpty)
+    }
+
+    func testSQLiteStoreUsesWALJournalMode() throws {
+        let (_, storeURL, directory) = try makeSQLiteService()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        var journalMode: String?
+        try withDatabase(at: storeURL) { db in
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "PRAGMA journal_mode", -1, &statement, nil) == SQLITE_OK else {
+                throw XCTSkip("Failed to query sqlite journal mode")
+            }
+            defer { sqlite3_finalize(statement) }
+
+            guard sqlite3_step(statement) == SQLITE_ROW,
+                  let text = sqlite3_column_text(statement, 0) else {
+                throw XCTSkip("Failed to read sqlite journal mode")
+            }
+            journalMode = String(cString: text)
+        }
+
+        XCTAssertEqual(journalMode?.lowercased(), "wal")
+    }
+
+    func testSQLiteUpdateIntervalMatchingSummaryAdjustsPersistedInterval() throws {
+        let (sqliteService, _, directory) = try makeSQLiteService()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        let originalStart = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: today)!
+        let originalEnd = calendar.date(bySettingHour: 10, minute: 0, second: 0, of: today)!
+        let interval = try sqliteService.createInterval(startDate: originalStart)
+        try sqliteService.closeInterval(interval, endDate: originalEnd)
+
+        let summary = try XCTUnwrap(awaitValue { await sqliteService.intervalSummariesForDayAsync(today) }.first)
+        let updatedStart = calendar.date(bySettingHour: 14, minute: 0, second: 0, of: today)!
+        let updatedEnd = calendar.date(bySettingHour: 15, minute: 30, second: 0, of: today)!
+
+        try sqliteService.updateInterval(matching: summary, newStartDate: updatedStart, newEndDate: updatedEnd)
+
+        let updated = try XCTUnwrap(sqliteService.fetchAllIntervals().first)
+        XCTAssertEqual(updated.startDate, updatedStart)
+        XCTAssertEqual(updated.endDate, updatedEnd)
+        XCTAssertEqual(sqliteService.durationForDay(today), 5400, accuracy: 2)
     }
 
     func testSQLiteDeleteIntervalMatchingSummaryRemovesSpanningInterval() throws {

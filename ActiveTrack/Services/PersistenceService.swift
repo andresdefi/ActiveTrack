@@ -3,6 +3,44 @@ import SwiftData
 import SQLite3
 
 private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+private let sqliteBusyTimeoutMilliseconds: Int32 = 5_000
+
+private enum SQLiteConnectionMode {
+    case readOnly
+    case readWrite
+}
+
+private func configureSQLiteConnection(_ db: OpaquePointer?, mode: SQLiteConnectionMode) throws {
+    sqlite3_busy_timeout(db, sqliteBusyTimeoutMilliseconds)
+
+    let pragmas: [String]
+    switch mode {
+    case .readOnly:
+        pragmas = [
+            "PRAGMA query_only = 1",
+            "PRAGMA temp_store = MEMORY"
+        ]
+    case .readWrite:
+        pragmas = [
+            "PRAGMA journal_mode = WAL",
+            "PRAGMA synchronous = NORMAL",
+            "PRAGMA temp_store = MEMORY",
+            "PRAGMA wal_autocheckpoint = 1000"
+        ]
+    }
+
+    for pragma in pragmas {
+        guard sqlite3_exec(db, pragma, nil, nil, nil) == SQLITE_OK else {
+            let message: String
+            if let db {
+                message = String(cString: sqlite3_errmsg(db))
+            } else {
+                message = "Failed to configure sqlite connection"
+            }
+            throw PersistenceError.saveFailed(underlying: message)
+        }
+    }
+}
 
 enum PersistenceError: Error, Equatable {
     case saveFailed(underlying: String)
@@ -278,7 +316,13 @@ private final class SQLiteReadConnection {
             if let opened { sqlite3_close(opened) }
             return nil
         }
-        sqlite3_busy_timeout(opened, 1000)
+
+        do {
+            try configureSQLiteConnection(opened, mode: .readOnly)
+        } catch {
+            if let opened { sqlite3_close(opened) }
+            return nil
+        }
         db = opened
         return opened
     }
@@ -549,6 +593,82 @@ final class PersistenceService {
             if !changedDays.isEmpty {
                 notifyPersistenceDidChange(PersistenceChange(kind: .dayDurationsChanged, affectedDays: changedDays))
             }
+        } catch {
+            throw PersistenceError.saveFailed(underlying: String(describing: error))
+        }
+    }
+
+    func updateInterval(
+        matching summary: DayIntervalSummary,
+        newStartDate: Date,
+        newEndDate: Date
+    ) throws {
+        guard !summary.isOpen, let sourceEnd = summary.sourceEnd else { return }
+        guard newEndDate > newStartDate else {
+            throw PersistenceError.saveFailed(underlying: "End time must be after start time.")
+        }
+
+        let changedDays = affectedDaysForIntervalUpdate(
+            oldStartDate: summary.sourceStart,
+            oldEndDate: sourceEnd,
+            newStartDate: newStartDate,
+            newEndDate: newEndDate
+        )
+
+        guard databaseURL != nil else {
+            guard let interval = fetchAllIntervals().first(where: { interval in
+                abs(interval.startDate.timeIntervalSince(summary.sourceStart)) < 0.001 &&
+                abs((interval.endDate ?? .distantPast).timeIntervalSince(sourceEnd)) < 0.001
+            }) else {
+                return
+            }
+
+            interval.startDate = newStartDate
+            interval.endDate = newEndDate
+            do {
+                try modelContext.save()
+                if !changedDays.isEmpty {
+                    notifyPersistenceDidChange(PersistenceChange(kind: .dayDurationsChanged, affectedDays: changedDays))
+                }
+                return
+            } catch {
+                throw PersistenceError.saveFailed(underlying: error.localizedDescription)
+            }
+        }
+
+        do {
+            try withWritableStore { db in
+                guard let intervalRecord = try readIntervalRecord(
+                    db: db,
+                    matchingStartDate: summary.sourceStart,
+                    matchingEndDate: sourceEnd
+                ) else {
+                    return
+                }
+                try applyDaySummaryDelta(startDate: intervalRecord.startDate, endDate: sourceEnd, multiplier: -1, db: db)
+                _ = try executeUpdate(
+                    db: db,
+                    sql: """
+                    UPDATE ZACTIVEINTERVAL
+                    SET ZSTARTDATE = ?1,
+                        ZENDDATE = ?2,
+                        Z_OPT = Z_OPT + 1
+                    WHERE Z_PK = ?3
+                    """,
+                    bind: { statement in
+                        sqlite3_bind_double(statement, 1, newStartDate.timeIntervalSinceReferenceDate)
+                        sqlite3_bind_double(statement, 2, newEndDate.timeIntervalSinceReferenceDate)
+                        sqlite3_bind_int64(statement, 3, intervalRecord.primaryKey)
+                    }
+                )
+                try applyDaySummaryDelta(startDate: newStartDate, endDate: newEndDate, multiplier: 1, db: db)
+            }
+            invalidateDaySummaryCache()
+            if !changedDays.isEmpty {
+                notifyPersistenceDidChange(PersistenceChange(kind: .dayDurationsChanged, affectedDays: changedDays))
+            }
+        } catch let error as PersistenceError {
+            throw error
         } catch {
             throw PersistenceError.saveFailed(underlying: String(describing: error))
         }
@@ -974,6 +1094,16 @@ final class PersistenceService {
         return affectedDays
     }
 
+    private func affectedDaysForIntervalUpdate(
+        oldStartDate: Date,
+        oldEndDate: Date,
+        newStartDate: Date,
+        newEndDate: Date
+    ) -> Set<Date> {
+        affectedDays(from: oldStartDate, to: oldEndDate)
+            .union(affectedDays(from: newStartDate, to: newEndDate))
+    }
+
     private func notifyPersistenceDidChange(_ change: PersistenceChange = .fullReload) {
         NotificationCenter.default.post(name: .activeTrackPersistenceDidChange, object: change)
     }
@@ -1251,7 +1381,19 @@ final class PersistenceService {
             throw SQLitePersistenceFailure.openFailed(message)
         }
 
-        sqlite3_busy_timeout(opened, 1000)
+        do {
+            try configureSQLiteConnection(opened, mode: .readWrite)
+        } catch let error as PersistenceError {
+            if let opened {
+                sqlite3_close(opened)
+            }
+            throw SQLitePersistenceFailure.openFailed(String(describing: error))
+        } catch {
+            if let opened {
+                sqlite3_close(opened)
+            }
+            throw SQLitePersistenceFailure.openFailed(error.localizedDescription)
+        }
         writeConnection = opened
         return opened
     }
@@ -1387,7 +1529,7 @@ final class PersistenceService {
             }
             defer { sqlite3_close(db) }
 
-            sqlite3_busy_timeout(db, 1000)
+            try configureSQLiteConnection(db, mode: .readOnly)
             let integrity = try backgroundQuerySingleText(db: db, sql: "PRAGMA integrity_check")
             guard integrity.lowercased() != "ok" else { return nil }
             return "Store integrity check reported issues. Tracking continues with recovery safeguards."
@@ -1469,7 +1611,7 @@ final class PersistenceService {
         }
         defer { sqlite3_close(db) }
 
-        sqlite3_busy_timeout(db, 1000)
+        try configureSQLiteConnection(db, mode: .readWrite)
         try ensureBackgroundSchema(db: db)
         do {
             try backgroundExecuteUpdate(db: db, sql: "BEGIN IMMEDIATE")

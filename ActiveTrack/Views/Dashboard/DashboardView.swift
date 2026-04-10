@@ -17,6 +17,10 @@ struct DashboardMonthSection: Identifiable, Sendable {
 @MainActor
 @Observable
 final class DashboardHistoryStore {
+    private static let chartDays = 14
+    private static let chartWeeks = 12
+    private static let chartMonths = 12
+
     private let persistenceService: PersistenceService
     private(set) var dayDurations: [Date: TimeInterval] = [:]
     private(set) var chartData = HistoryChartData(daily: [], weekly: [], monthly: [])
@@ -33,7 +37,11 @@ final class DashboardHistoryStore {
     }
 
     func reload() async {
-        let snapshot = await persistenceService.dashboardHistorySnapshotAsync(days: 14, weeks: 12, months: 12)
+        let snapshot = await persistenceService.dashboardHistorySnapshotAsync(
+            days: Self.chartDays,
+            weeks: Self.chartWeeks,
+            months: Self.chartMonths
+        )
         apply(snapshot)
         hasLoaded = true
     }
@@ -56,7 +64,7 @@ final class DashboardHistoryStore {
             }
         }
 
-        apply(dayDurations: nextDurations)
+        apply(dayDurations: nextDurations, affectedDays: change.affectedDays)
     }
 
     private func apply(_ snapshot: DashboardHistorySnapshot) {
@@ -65,10 +73,21 @@ final class DashboardHistoryStore {
         monthSections = Self.buildMonthSections(from: snapshot.dayDurations)
     }
 
-    private func apply(dayDurations: [Date: TimeInterval]) {
+    private func apply(dayDurations: [Date: TimeInterval], affectedDays: Set<Date>) {
         self.dayDurations = dayDurations
-        chartData = persistenceService.chartData(from: dayDurations, days: 14, weeks: 12, months: 12)
-        monthSections = Self.buildMonthSections(from: dayDurations)
+        if Self.affectsVisibleChartRange(affectedDays) {
+            chartData = persistenceService.chartData(
+                from: dayDurations,
+                days: Self.chartDays,
+                weeks: Self.chartWeeks,
+                months: Self.chartMonths
+            )
+        }
+        monthSections = Self.updateMonthSections(
+            monthSections,
+            from: dayDurations,
+            affectedDays: affectedDays
+        )
     }
 
     private static func buildMonthSections(from dayDurations: [Date: TimeInterval]) -> [DashboardMonthSection] {
@@ -90,6 +109,92 @@ final class DashboardHistoryStore {
                     days: monthDays
                 )
             }
+    }
+
+    private static func updateMonthSections(
+        _ existingSections: [DashboardMonthSection],
+        from dayDurations: [Date: TimeInterval],
+        affectedDays: Set<Date>
+    ) -> [DashboardMonthSection] {
+        let calendar = Calendar.current
+        let changedMonths = Set(affectedDays.compactMap { monthStart(for: $0, calendar: calendar) })
+        guard !changedMonths.isEmpty else { return existingSections }
+
+        var sectionsByMonth = Dictionary(uniqueKeysWithValues: existingSections.map { ($0.monthStart, $0) })
+        var daysByChangedMonth: [Date: [Date]] = [:]
+
+        for day in dayDurations.keys {
+            guard let monthStart = monthStart(for: day, calendar: calendar), changedMonths.contains(monthStart) else {
+                continue
+            }
+            daysByChangedMonth[monthStart, default: []].append(day)
+        }
+
+        for monthStart in changedMonths {
+            let monthDays = daysByChangedMonth[monthStart, default: []].sorted(by: >)
+            guard !monthDays.isEmpty else {
+                sectionsByMonth.removeValue(forKey: monthStart)
+                continue
+            }
+
+            let total = monthDays.reduce(0) { $0 + (dayDurations[$1] ?? 0) }
+            sectionsByMonth[monthStart] = DashboardMonthSection(
+                monthStart: monthStart,
+                title: monthStart.monthYearString,
+                average: total / Double(monthDays.count),
+                days: monthDays
+            )
+        }
+
+        return sectionsByMonth.keys.sorted(by: >).compactMap { sectionsByMonth[$0] }
+    }
+
+    private static func affectsVisibleChartRange(_ affectedDays: Set<Date>) -> Bool {
+        guard let range = visibleChartRange() else { return true }
+        return affectedDays.contains { day in
+            day >= range.start && day < range.end
+        }
+    }
+
+    private static func visibleChartRange(now: Date = .now, calendar: Calendar = .current) -> (start: Date, end: Date)? {
+        var rangeStarts: [Date] = []
+        var rangeEnds: [Date] = []
+
+        if chartDays > 0 {
+            let today = calendar.startOfDay(for: now)
+            if let firstDay = calendar.date(byAdding: .day, value: -(chartDays - 1), to: today),
+               let end = calendar.date(byAdding: .day, value: 1, to: today) {
+                rangeStarts.append(firstDay)
+                rangeEnds.append(end)
+            }
+        }
+
+        if chartWeeks > 0 {
+            let components = calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: now)
+            if let currentWeekStart = calendar.date(from: components),
+               let firstWeekStart = calendar.date(byAdding: .weekOfYear, value: -(chartWeeks - 1), to: currentWeekStart),
+               let end = calendar.date(byAdding: .day, value: 7, to: currentWeekStart) {
+                rangeStarts.append(firstWeekStart)
+                rangeEnds.append(end)
+            }
+        }
+
+        if chartMonths > 0 {
+            let components = calendar.dateComponents([.year, .month], from: now)
+            if let currentMonthStart = calendar.date(from: components),
+               let firstMonthStart = calendar.date(byAdding: .month, value: -(chartMonths - 1), to: currentMonthStart),
+               let end = calendar.date(byAdding: .month, value: 1, to: currentMonthStart) {
+                rangeStarts.append(firstMonthStart)
+                rangeEnds.append(end)
+            }
+        }
+
+        guard let start = rangeStarts.min(), let end = rangeEnds.max() else { return nil }
+        return (start, end)
+    }
+
+    private static func monthStart(for day: Date, calendar: Calendar) -> Date? {
+        calendar.date(from: calendar.dateComponents([.year, .month], from: day))
     }
 }
 

@@ -7,6 +7,7 @@ struct DayDetailView: View {
 
     @State private var persistedIntervals: [DayIntervalSummary] = []
     @State private var liveRefreshToken = 0
+    @State private var intervalPendingEdit: DayIntervalSummary?
     @State private var intervalPendingDeletion: DayIntervalSummary?
     @State private var deletingIntervalID: String?
     @State private var deletionErrorMessage: String?
@@ -51,6 +52,15 @@ struct DayDetailView: View {
                                 ProgressView()
                                     .controlSize(.small)
                             } else if !interval.isOpen {
+                                Button {
+                                    intervalPendingEdit = interval
+                                } label: {
+                                    Image(systemName: "pencil")
+                                }
+                                .buttonStyle(.borderless)
+                                .help("Edit interval")
+                                .disabled(isDeleting)
+
                                 Button(role: .destructive) {
                                     intervalPendingDeletion = interval
                                 } label: {
@@ -64,6 +74,11 @@ struct DayDetailView: View {
                         .padding(.vertical, 2)
                         .contextMenu {
                             if !interval.isOpen {
+                                Button("Edit Interval", systemImage: "pencil") {
+                                    intervalPendingEdit = interval
+                                }
+                                .disabled(isDeleting)
+
                                 Button("Delete Interval", systemImage: "trash", role: .destructive) {
                                     intervalPendingDeletion = interval
                                 }
@@ -72,6 +87,14 @@ struct DayDetailView: View {
                         }
                         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                             if !interval.isOpen {
+                                Button {
+                                    intervalPendingEdit = interval
+                                } label: {
+                                    Label("Edit", systemImage: "pencil")
+                                }
+                                .tint(.blue)
+                                .disabled(isDeleting)
+
                                 Button(role: .destructive) {
                                     intervalPendingDeletion = interval
                                 } label: {
@@ -97,6 +120,15 @@ struct DayDetailView: View {
         .onReceive(NotificationCenter.default.publisher(for: .activeTrackDisplayTimeChanged)) { _ in
             guard timerService.isRunning, Calendar.current.isDateInToday(day) else { return }
             liveRefreshToken &+= 1
+        }
+        .sheet(item: $intervalPendingEdit) { interval in
+            IntervalEditorSheet(interval: interval) { newStartDate, newEndDate in
+                try persistenceService.updateInterval(
+                    matching: interval,
+                    newStartDate: newStartDate,
+                    newEndDate: newEndDate
+                )
+            }
         }
         .alert(
             "Delete Interval?",
@@ -186,6 +218,84 @@ private struct LiveDayHeader: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+        }
+    }
+}
+
+private struct IntervalEditorSheet: View {
+    let interval: DayIntervalSummary
+    let onSave: (Date, Date) throws -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var startDate: Date
+    @State private var endDate: Date
+    @State private var errorMessage: String?
+
+    init(interval: DayIntervalSummary, onSave: @escaping (Date, Date) throws -> Void) {
+        self.interval = interval
+        self.onSave = onSave
+        _startDate = State(initialValue: interval.sourceStart)
+        _endDate = State(initialValue: interval.sourceEnd ?? interval.end)
+    }
+
+    private var isClippedToDay: Bool {
+        interval.start != interval.sourceStart || interval.end != (interval.sourceEnd ?? interval.end)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Edit Interval")
+                .font(.title3.bold())
+
+            if isClippedToDay {
+                Text("You're editing the full interval, not only the clipped portion shown in this day view.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Form {
+                DatePicker("Start", selection: $startDate)
+                DatePicker("End", selection: $endDate)
+            }
+            .formStyle(.grouped)
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    dismiss()
+                }
+                Button("Save") {
+                    save()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(endDate <= startDate)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 420)
+    }
+
+    private func save() {
+        do {
+            try onSave(startDate, endDate)
+            dismiss()
+        } catch let error as PersistenceError {
+            errorMessage = message(for: error)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func message(for error: PersistenceError) -> String {
+        switch error {
+        case .saveFailed(let underlying):
+            return underlying
         }
     }
 }
