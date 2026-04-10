@@ -1,0 +1,26 @@
+import SwiftUI
+
+struct UITestHarnessView: View {
+    let timerService: TimerService
+    let persistenceService: PersistenceService
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("UI Smoke Tests")
+                .font(.title2.bold())
+                .accessibilityIdentifier("activeTrack.uiSmokeTitle")
+
+            TodaySummaryView(timerService: timerService)
+            TimerControlsView(timerService: timerService)
+            TargetTimerView(timerService: timerService)
+
+            Divider()
+
+            Text("This window exists only for launch-argument-driven UI smoke tests.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(20)
+        .frame(minWidth: 360, minHeight: 320)
+    }
+}

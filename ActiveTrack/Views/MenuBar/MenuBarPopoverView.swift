@@ -7,7 +7,7 @@ struct MenuBarPopoverView: View {
     @Environment(\.openWindow) private var openWindow
     @AppStorage("lastSeenReleaseNotesVersion") private var lastSeenReleaseNotesVersion = ""
     @State private var showingWhatsNew = false
-    private let currentReleaseNotesVersion = "1.2.9"
+    private let currentReleaseNotesVersion = "1.2.10"
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
@@ -57,6 +57,11 @@ struct MenuBarPopoverView: View {
                         NSApp.activate(ignoringOtherApps: true)
                         NotificationCenter.default.post(name: .activeTrackShowDashboardOverview, object: nil)
                         HealthLog.event("dashboard_open")
+                    }
+                    .buttonStyle(.link)
+
+                    SettingsLink {
+                        Text("Settings")
                     }
                     .buttonStyle(.link)
 
@@ -119,10 +124,10 @@ struct MenuBarPopoverView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("What's New in \(currentReleaseNotesVersion)")
                 .font(.title3.bold())
-            Text("• Hardened SQLite with WAL mode, a longer busy timeout, and connection pragmas tuned for fewer lock conflicts")
-            Text("• Dashboard history updates now patch only the affected months and skip chart rebuilds when changes are outside the visible range")
-            Text("• Added interval editing in the day detail view so logged sessions can be corrected without deleting them")
-            Text("• Added regression coverage for WAL mode, incremental dashboard updates, and interval editing")
+            Text("• Added a real Settings window for launch at login, time format, tracking preferences, notifications, export, and backups")
+            Text("• Cleaned up the popover so Target controls stay hidden until the feature is enabled")
+            Text("• Added CSV and JSON export plus automatic and manual local backups for safer data recovery")
+            Text("• Added a dedicated macOS UI smoke test target with launch-argument-driven app harness coverage")
             HStack {
                 Spacer()
                 Button("Done") {
@@ -139,12 +144,13 @@ struct MenuBarPopoverView: View {
     }
 }
 
-private struct TargetTimerView: View {
+struct TargetTimerView: View {
     let timerService: TimerService
 
     @AppStorage("targetTimerDraftHours") private var draftHours = 6
     @AppStorage("targetTimerDraftMinutes") private var draftMinutes = 0
     @AppStorage("targetTimerDraftMode") private var draftModeRaw = TimerTargetMode.todayTotal.rawValue
+    @AppStorage(AppPreferenceKey.targetSectionEnabled) private var targetSectionEnabled = false
 
     private let minuteOptions = Array(stride(from: 0, through: 55, by: 5))
 
@@ -156,6 +162,26 @@ private struct TargetTimerView: View {
         Binding(
             get: { TimerTargetMode(rawValue: draftModeRaw) ?? .todayTotal },
             set: { draftModeRaw = $0.rawValue }
+        )
+    }
+
+    private var isTargetVisible: Bool {
+        targetSectionEnabled || timerService.isTargetActive || timerService.hasReachedTarget
+    }
+
+    private var targetToggleBinding: Binding<Bool> {
+        Binding(
+            get: { isTargetVisible },
+            set: { newValue in
+                if newValue {
+                    targetSectionEnabled = true
+                    syncDraftWithTargetIfNeeded()
+                } else {
+                    targetSectionEnabled = false
+                    timerService.dismissReachedTarget()
+                    timerService.clearTarget()
+                }
+            }
         )
     }
 
@@ -172,59 +198,72 @@ private struct TargetTimerView: View {
                 } else if timerService.isTargetActive {
                     statusPill(title: "Active", color: .blue)
                 }
+
+                Toggle("", isOn: targetToggleBinding)
+                    .labelsHidden()
+                    .accessibilityIdentifier("activeTrack.targetToggle")
             }
 
-            if timerService.hasReachedTarget {
-                reachedCard
-            } else if timerService.isTargetActive {
-                activeCard
-            }
-
-            Picker("Count From", selection: selectedMode) {
-                ForEach(TimerTargetMode.allCases) { mode in
-                    Text(mode.title)
-                        .tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            HStack(spacing: 10) {
-                Picker("Hours", selection: $draftHours) {
-                    ForEach(0..<25, id: \.self) { hour in
-                        Text("\(hour)h")
-                            .tag(hour)
-                    }
-                }
-
-                Picker("Minutes", selection: $draftMinutes) {
-                    ForEach(minuteOptions, id: \.self) { minutes in
-                        Text("\(minutes)m")
-                            .tag(minutes)
-                    }
-                }
-            }
-            .pickerStyle(.menu)
-            .labelsHidden()
-
-            HStack {
-                Button(timerService.isTargetActive ? "Update Target" : "Set Target") {
-                    timerService.setTarget(duration: selectedDuration, mode: selectedMode.wrappedValue)
-                }
-                .disabled(selectedDuration <= 0)
-
-                Spacer()
-
+            if isTargetVisible {
                 if timerService.hasReachedTarget {
-                    Button("Dismiss") {
-                        timerService.dismissReachedTarget()
-                    }
-                    .buttonStyle(.borderless)
+                    reachedCard
                 } else if timerService.isTargetActive {
-                    Button("Clear") {
-                        timerService.clearTarget()
-                    }
-                    .buttonStyle(.borderless)
+                    activeCard
                 }
+
+                Picker("Count From", selection: selectedMode) {
+                    ForEach(TimerTargetMode.allCases) { mode in
+                        Text(mode.title)
+                            .tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("activeTrack.targetModePicker")
+
+                HStack(spacing: 10) {
+                    Picker("Hours", selection: $draftHours) {
+                        ForEach(0..<25, id: \.self) { hour in
+                            Text("\(hour)h")
+                                .tag(hour)
+                        }
+                    }
+
+                    Picker("Minutes", selection: $draftMinutes) {
+                        ForEach(minuteOptions, id: \.self) { minutes in
+                            Text("\(minutes)m")
+                                .tag(minutes)
+                        }
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+
+                HStack {
+                    Button(timerService.isTargetActive ? "Update Target" : "Set Target") {
+                        targetSectionEnabled = true
+                        timerService.setTarget(duration: selectedDuration, mode: selectedMode.wrappedValue)
+                    }
+                    .disabled(selectedDuration <= 0)
+                    .accessibilityIdentifier("activeTrack.targetSetButton")
+
+                    Spacer()
+
+                    if timerService.hasReachedTarget {
+                        Button("Dismiss") {
+                            timerService.dismissReachedTarget()
+                        }
+                        .buttonStyle(.borderless)
+                    } else if timerService.isTargetActive {
+                        Button("Clear") {
+                            timerService.clearTarget()
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+            } else {
+                Text("Turn on Target to show the goal controls in the popover.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(12)

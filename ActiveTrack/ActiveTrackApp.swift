@@ -12,6 +12,82 @@ private final class AppTerminationCoordinator {
     weak var timerService: TimerService?
 }
 
+@MainActor
+private final class UITestLaunchCoordinator {
+    static let shared = UITestLaunchCoordinator()
+
+    var windowLauncher: UITestWindowLauncher?
+    var isUITesting = false
+
+    func presentConfiguredWindowsIfNeeded() {
+        if isUITesting {
+            closePlaceholderWindows()
+        }
+        windowLauncher?.presentConfiguredWindows()
+    }
+
+    private func closePlaceholderWindows() {
+        for window in NSApp.windows where window.title == "ActiveTrack" {
+            window.close()
+        }
+    }
+}
+
+@MainActor
+private final class UITestWindowLauncher {
+    private let options: AppLaunchOptions
+    private let timerService: TimerService
+    private let persistenceService: PersistenceService
+    private var windows: [NSWindow] = []
+
+    init(options: AppLaunchOptions, timerService: TimerService, persistenceService: PersistenceService) {
+        self.options = options
+        self.timerService = timerService
+        self.persistenceService = persistenceService
+    }
+
+    func presentConfiguredWindows() {
+        guard options.isUITesting else { return }
+
+        NSApp.setActivationPolicy(.regular)
+
+        if options.openUISmokeWindowOnLaunch {
+            windows.append(makeWindow(title: "ActiveTrack Smoke Tests") {
+                UITestHarnessView(timerService: timerService, persistenceService: persistenceService)
+            })
+        }
+
+        if options.openDashboardOnLaunch {
+            windows.append(makeWindow(title: "ActiveTrack Dashboard") {
+                DashboardView(timerService: timerService, persistenceService: persistenceService)
+            })
+        }
+
+        if options.openSettingsOnLaunch {
+            windows.append(makeWindow(title: "ActiveTrack Settings") {
+                SettingsView(persistenceService: persistenceService)
+            })
+        }
+
+        windows.forEach { window in
+            window.center()
+            window.makeKeyAndOrderFront(nil)
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func makeWindow<Content: View>(title: String, @ViewBuilder content: () -> Content) -> NSWindow {
+        let controller = NSHostingController(rootView: content())
+        let window = NSWindow(contentViewController: controller)
+        window.title = title
+        window.setContentSize(NSSize(width: 900, height: 620))
+        window.styleMask.insert(.resizable)
+        window.identifier = NSUserInterfaceItemIdentifier(title)
+        return window
+    }
+}
+
 // MARK: - AppKit Status Bar Controller
 
 /// Manages the NSStatusItem directly via AppKit, bypassing MenuBarExtra's
@@ -182,6 +258,12 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         ) { [weak self] _ in
             MainActor.assumeIsolated { [weak self] in
                 self?.showPopover()
+                guard let self,
+                      let duration = self.timerService.reachedTargetDuration,
+                      let mode = self.timerService.reachedTargetMode else { return }
+                Task {
+                    await TargetNotificationController.postTargetReachedNotification(duration: duration, mode: mode)
+                }
             }
         }
     }
@@ -244,6 +326,10 @@ final class ActiveTrackAppDelegate: NSObject, NSApplicationDelegate {
         false
     }
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        UITestLaunchCoordinator.shared.presentConfiguredWindowsIfNeeded()
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let termination = terminationAttempt()
         guard termination.shouldTerminate else {
@@ -297,34 +383,59 @@ struct ActiveTrackApp: App {
     @NSApplicationDelegateAdaptor(ActiveTrackAppDelegate.self) private var appDelegate
     @State private var timerService: TimerService
     @State private var persistenceService: PersistenceService
+    private let isUITesting: Bool
     // Retained to keep the status item alive
-    private let statusBarController: StatusBarController
+    private let statusBarController: StatusBarController?
+    private let uiTestWindowLauncher: UITestWindowLauncher?
 
     init() {
-        let storeURL = Self.storeURL()
-        HealthLog.event("app_launch", metadata: ["store_path": storeURL.path])
+        let launchOptions = AppLaunchOptions()
+        let storeURL = Self.storeURL(for: launchOptions)
+        HealthLog.event("app_launch", metadata: ["store_path": storeURL?.path ?? "in-memory"])
         let container: ModelContainer
         do {
-            let config = ModelConfiguration(url: storeURL, allowsSave: true)
+            let config: ModelConfiguration
+            if let storeURL {
+                config = ModelConfiguration(url: storeURL, allowsSave: true)
+            } else {
+                config = ModelConfiguration(isStoredInMemoryOnly: true)
+            }
             container = try ModelContainer(
                 for: ActiveInterval.self,
                 migrationPlan: ActiveTrackMigrationPlan.self,
                 configurations: config
             )
         } catch {
-            logger_app.error("Failed to open persistent store at \(storeURL.path, privacy: .public): \(error.localizedDescription). Rebuilding local store.")
+            if let storeURL {
+                logger_app.error("Failed to open persistent store at \(storeURL.path, privacy: .public): \(error.localizedDescription). Rebuilding local store.")
+            } else {
+                logger_app.error("Failed to open in-memory store: \(error.localizedDescription).")
+            }
             HealthLog.event("store_open_failed", metadata: ["error": error.localizedDescription])
-            Self.quarantineStoreFiles(at: storeURL)
-            do {
-                let freshConfig = ModelConfiguration(url: storeURL, allowsSave: true)
-                container = try ModelContainer(
-                    for: ActiveInterval.self,
-                    migrationPlan: ActiveTrackMigrationPlan.self,
-                    configurations: freshConfig
-                )
-            } catch {
-                logger_app.error("Failed to rebuild persistent store: \(error.localizedDescription). Falling back to in-memory store.")
-                HealthLog.event("store_rebuild_failed", metadata: ["error": error.localizedDescription])
+            if let storeURL {
+                Self.quarantineStoreFiles(at: storeURL)
+                do {
+                    let freshConfig = ModelConfiguration(url: storeURL, allowsSave: true)
+                    container = try ModelContainer(
+                        for: ActiveInterval.self,
+                        migrationPlan: ActiveTrackMigrationPlan.self,
+                        configurations: freshConfig
+                    )
+                } catch {
+                    logger_app.error("Failed to rebuild persistent store: \(error.localizedDescription). Falling back to in-memory store.")
+                    HealthLog.event("store_rebuild_failed", metadata: ["error": error.localizedDescription])
+                    let memoryConfig = ModelConfiguration(isStoredInMemoryOnly: true)
+                    do {
+                        container = try ModelContainer(
+                            for: ActiveInterval.self,
+                            migrationPlan: ActiveTrackMigrationPlan.self,
+                            configurations: memoryConfig
+                        )
+                    } catch {
+                        fatalError("Failed to create model container: \(error)")
+                    }
+                }
+            } else {
                 let memoryConfig = ModelConfiguration(isStoredInMemoryOnly: true)
                 do {
                     container = try ModelContainer(
@@ -333,7 +444,7 @@ struct ActiveTrackApp: App {
                         configurations: memoryConfig
                     )
                 } catch {
-                    fatalError("Failed to create model container: \(error)")
+                    fatalError("Failed to create in-memory model container: \(error)")
                 }
             }
         }
@@ -343,21 +454,68 @@ struct ActiveTrackApp: App {
             HealthLog.event("startup_warning", metadata: ["message": startupWarning])
         }
         let timer = TimerService(persistenceService: persistence)
+        if launchOptions.seedSampleHistory {
+            Self.seedUITestHistory(using: persistence)
+            timer.refreshTodayTotal()
+        }
+        if launchOptions.startRunningTimerOnLaunch {
+            timer.start()
+        }
+        if storeURL != nil && !launchOptions.isUITesting {
+            Task { @MainActor in
+                do {
+                    _ = try persistence.createAutomaticBackupIfNeeded()
+                } catch {
+                    HealthLog.event("automatic_backup_failed", metadata: ["error": error.localizedDescription])
+                }
+            }
+        }
         AppTerminationCoordinator.shared.timerService = timer
 
         self._timerService = State(initialValue: timer)
         self._persistenceService = State(initialValue: persistence)
-        self.statusBarController = StatusBarController(timerService: timer, persistenceService: persistence)
+        self.isUITesting = launchOptions.isUITesting
+        self.statusBarController = launchOptions.isUITesting ? nil : StatusBarController(timerService: timer, persistenceService: persistence)
+        let launcher = UITestWindowLauncher(options: launchOptions, timerService: timer, persistenceService: persistence)
+        self.uiTestWindowLauncher = launchOptions.isUITesting ? launcher : nil
+        UITestLaunchCoordinator.shared.isUITesting = launchOptions.isUITesting
+        UITestLaunchCoordinator.shared.windowLauncher = launchOptions.isUITesting ? launcher : nil
     }
 
     var body: some Scene {
         Window("ActiveTrack", id: "dashboard") {
-            DashboardView(timerService: timerService, persistenceService: persistenceService)
+            Group {
+                if isUITesting {
+                    EmptyView()
+                } else {
+                    DashboardView(timerService: timerService, persistenceService: persistenceService)
+                }
+            }
         }
-        .defaultSize(width: 900, height: 600)
+        .defaultSize(width: isUITesting ? 1 : 900, height: isUITesting ? 1 : 600)
+
+        Settings {
+            SettingsView(persistenceService: persistenceService)
+        }
     }
 
-    private static func storeURL() -> URL {
+    private static func storeURL(for launchOptions: AppLaunchOptions) -> URL? {
+        if launchOptions.useInMemoryStore {
+            return nil
+        }
+
+        if launchOptions.isUITesting {
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ActiveTrack-UITests", isDirectory: true)
+                .appendingPathComponent(String(ProcessInfo.processInfo.processIdentifier), isDirectory: true)
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            return directory.appendingPathComponent("ActiveTrack.store")
+        }
+
+        return persistentStoreURL()
+    }
+
+    private static func persistentStoreURL() -> URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let directory = appSupport.appendingPathComponent("ActiveTrack", isDirectory: true)
         if !FileManager.default.fileExists(atPath: directory.path) {
@@ -375,5 +533,27 @@ struct ActiveTrackApp: App {
             let backup = URL(fileURLWithPath: source.path + ".corrupt-\(timestamp)")
             try? fileManager.moveItem(at: source, to: backup)
         }
+    }
+
+    private static func seedUITestHistory(using persistence: PersistenceService) {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today)!
+
+        func insertInterval(on day: Date, startHour: Int, startMinute: Int, endHour: Int, endMinute: Int) {
+            guard let start = calendar.date(bySettingHour: startHour, minute: startMinute, second: 0, of: day),
+                  let end = calendar.date(bySettingHour: endHour, minute: endMinute, second: 0, of: day) else {
+                return
+            }
+            do {
+                let interval = try persistence.createInterval(startDate: start)
+                try persistence.closeInterval(interval, endDate: end)
+            } catch {
+                HealthLog.event("ui_test_seed_failed", metadata: ["error": error.localizedDescription])
+            }
+        }
+
+        insertInterval(on: yesterday, startHour: 14, startMinute: 0, endHour: 15, endMinute: 30)
+        insertInterval(on: today, startHour: 9, startMinute: 0, endHour: 10, endMinute: 0)
     }
 }

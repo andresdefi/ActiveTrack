@@ -11,6 +11,7 @@ struct DayDetailView: View {
     @State private var intervalPendingDeletion: DayIntervalSummary?
     @State private var deletingIntervalID: String?
     @State private var deletionErrorMessage: String?
+    @AppStorage(AppPreferenceKey.timeDisplayPreference) private var timeDisplayPreferenceRaw = TimeDisplayPreference.system.rawValue
 
     private var displayedIntervals: [DayIntervalSummary] {
         _ = liveRefreshToken
@@ -23,6 +24,10 @@ struct DayDetailView: View {
 
     private var displayedTotal: TimeInterval {
         displayedIntervals.reduce(0) { $0 + $1.duration }
+    }
+
+    private var timeDisplayPreference: TimeDisplayPreference {
+        TimeDisplayPreference(rawValue: timeDisplayPreferenceRaw) ?? .system
     }
 
     var body: some View {
@@ -41,7 +46,7 @@ struct DayDetailView: View {
                     ForEach(displayedIntervals) { interval in
                         HStack {
                             VStack(alignment: .leading) {
-                                Text("\(interval.start.timeString) – \(interval.end.timeString)")
+                                Text("\(interval.start.timeString(using: timeDisplayPreference)) – \(interval.end.timeString(using: timeDisplayPreference))")
                                     .font(.body)
                             }
                             Spacer()
@@ -149,7 +154,7 @@ struct DayDetailView: View {
                 intervalPendingDeletion = nil
             }
         } message: { interval in
-            Text("This will permanently remove the interval from \(interval.start.timeString) to \(interval.end.timeString).")
+            Text("This will permanently remove the interval from \(interval.start.timeString(using: timeDisplayPreference)) to \(interval.end.timeString(using: timeDisplayPreference)).")
         }
         .alert("Couldn't Delete Interval", isPresented: deletionErrorBinding) {
             Button("OK", role: .cancel) {

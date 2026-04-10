@@ -229,6 +229,7 @@ struct DashboardView: View {
             }
             .padding(24)
             .navigationTitle("ActiveTrack")
+            .accessibilityIdentifier("activeTrack.dashboardRoot")
         } else {
             NavigationSplitView(columnVisibility: $splitVisibility) {
                 DashboardSidebarView(
@@ -249,6 +250,7 @@ struct DashboardView: View {
                 }
             }
             .navigationTitle("ActiveTrack")
+            .accessibilityIdentifier("activeTrack.dashboardRoot")
             .task {
                 await historyStore.reloadIfNeeded()
             }
@@ -294,7 +296,8 @@ private struct DashboardSidebarView: View {
                     title: "Overview",
                     subtitle: "Charts and averages",
                     trailing: nil,
-                    isSelected: selectedItem == .overview
+                    isSelected: selectedItem == .overview,
+                    accessibilityIdentifier: "activeTrack.overviewButton"
                 ) {
                     selectedItem = .overview
                     splitVisibility = .all
@@ -422,6 +425,7 @@ private struct DashboardSidebarView: View {
         subtitle: String?,
         trailing: String?,
         isSelected: Bool,
+        accessibilityIdentifier: String? = nil,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
@@ -452,6 +456,7 @@ private struct DashboardSidebarView: View {
             )
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier(accessibilityIdentifier ?? "")
     }
 }
 

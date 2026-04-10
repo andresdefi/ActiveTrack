@@ -14,5 +14,6 @@ struct TimerControlsView: View {
         .controlSize(.large)
         .buttonStyle(.borderedProminent)
         .tint(timerService.isRunning ? .orange : .green)
+        .accessibilityIdentifier("activeTrack.timerToggleButton")
     }
 }

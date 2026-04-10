@@ -22,19 +22,31 @@
 		AA00000D /* MonthlyChartView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB00000D; };
 		AA00000E /* TimeFormatting.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB00000E; };
 		AA00000F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AB00000F; };
-		AA000010 /* TimerServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000010; };
-		AA000011 /* PersistenceServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000011; };
-		AA000013 /* ActiveTrackSchema.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000013; };
+			AA000010 /* TimerServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000010; };
+			AA000011 /* PersistenceServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000011; };
+			AA000013 /* ActiveTrackSchema.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000013; };
+			AA000014 /* AppPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000014; };
+			AA000015 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000015; };
+			AA000016 /* ActiveTrackUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000016; };
+			AA000017 /* AppLaunchOptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000017; };
+			AA000018 /* UITestHarnessView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000018; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
-		AC000001 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = AD000001;
-			proxyType = 1;
-			remoteGlobalIDString = AE000001;
-			remoteInfo = ActiveTrack;
-		};
+			AC000001 /* PBXContainerItemProxy */ = {
+				isa = PBXContainerItemProxy;
+				containerPortal = AD000001;
+				proxyType = 1;
+				remoteGlobalIDString = AE000001;
+				remoteInfo = ActiveTrack;
+			};
+			AC000002 /* PBXContainerItemProxy */ = {
+				isa = PBXContainerItemProxy;
+				containerPortal = AD000001;
+				proxyType = 1;
+				remoteGlobalIDString = AE000001;
+				remoteInfo = ActiveTrack;
+			};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
@@ -55,10 +67,16 @@
 		AB00000F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		AB000010 /* TimerServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimerServiceTests.swift; sourceTree = "<group>"; };
 		AB000011 /* PersistenceServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersistenceServiceTests.swift; sourceTree = "<group>"; };
-		AB000012 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		AB000013 /* ActiveTrackSchema.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActiveTrackSchema.swift; sourceTree = "<group>"; };
-		AF000001 /* ActiveTrack.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ActiveTrack.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		AF000002 /* ActiveTrackTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ActiveTrackTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+			AB000012 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+			AB000013 /* ActiveTrackSchema.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActiveTrackSchema.swift; sourceTree = "<group>"; };
+			AB000014 /* AppPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPreferences.swift; sourceTree = "<group>"; };
+			AB000015 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+			AB000016 /* ActiveTrackUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActiveTrackUITests.swift; sourceTree = "<group>"; };
+			AB000017 /* AppLaunchOptions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLaunchOptions.swift; sourceTree = "<group>"; };
+			AB000018 /* UITestHarnessView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITestHarnessView.swift; sourceTree = "<group>"; };
+			AF000001 /* ActiveTrack.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ActiveTrack.app; sourceTree = BUILT_PRODUCTS_DIR; };
+			AF000002 /* ActiveTrackTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ActiveTrackTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+			AF000003 /* ActiveTrackUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ActiveTrackUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -69,23 +87,31 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		B0000002 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
+			B0000002 /* Frameworks */ = {
+				isa = PBXFrameworksBuildPhase;
+				buildActionMask = 2147483647;
+				files = (
+				);
+				runOnlyForDeploymentPostprocessing = 0;
+			};
+			B0000003 /* Frameworks */ = {
+				isa = PBXFrameworksBuildPhase;
+				buildActionMask = 2147483647;
+				files = (
+				);
+				runOnlyForDeploymentPostprocessing = 0;
+			};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		B1000001 /* Root */ = {
 			isa = PBXGroup;
-			children = (
-				B1000002 /* ActiveTrack */,
-				B1000009 /* ActiveTrackTests */,
-				B100000A /* Products */,
-			);
+				children = (
+					B1000002 /* ActiveTrack */,
+					B1000009 /* ActiveTrackTests */,
+					B100000C /* ActiveTrackUITests */,
+					B100000A /* Products */,
+				);
 			sourceTree = "<group>";
 		};
 		B1000002 /* ActiveTrack */ = {
@@ -110,15 +136,17 @@
 			path = Models;
 			sourceTree = "<group>";
 		};
-		B1000004 /* Services */ = {
-			isa = PBXGroup;
-			children = (
-				AB000003 /* TimerService.swift */,
-				AB000004 /* PersistenceService.swift */,
-			);
-			path = Services;
-			sourceTree = "<group>";
-		};
+			B1000004 /* Services */ = {
+				isa = PBXGroup;
+				children = (
+					AB000003 /* TimerService.swift */,
+					AB000004 /* PersistenceService.swift */,
+					AB000014 /* AppPreferences.swift */,
+					AB000017 /* AppLaunchOptions.swift */,
+				);
+				path = Services;
+				sourceTree = "<group>";
+			};
 		B1000005 /* Views */ = {
 			isa = PBXGroup;
 			children = (
@@ -152,14 +180,16 @@
 			path = Dashboard;
 			sourceTree = "<group>";
 		};
-		B1000008 /* Shared */ = {
-			isa = PBXGroup;
-			children = (
-				AB00000E /* TimeFormatting.swift */,
-			);
-			path = Shared;
-			sourceTree = "<group>";
-		};
+			B1000008 /* Shared */ = {
+				isa = PBXGroup;
+				children = (
+						AB00000E /* TimeFormatting.swift */,
+						AB000015 /* SettingsView.swift */,
+						AB000018 /* UITestHarnessView.swift */,
+					);
+				path = Shared;
+				sourceTree = "<group>";
+			};
 		B1000009 /* ActiveTrackTests */ = {
 			isa = PBXGroup;
 			children = (
@@ -169,23 +199,32 @@
 			path = ActiveTrackTests;
 			sourceTree = "<group>";
 		};
-		B100000A /* Products */ = {
-			isa = PBXGroup;
-			children = (
-				AF000001 /* ActiveTrack.app */,
-				AF000002 /* ActiveTrackTests.xctest */,
-			);
-			name = Products;
-			sourceTree = "<group>";
-		};
-		B100000B /* Resources */ = {
+			B100000A /* Products */ = {
+				isa = PBXGroup;
+				children = (
+					AF000001 /* ActiveTrack.app */,
+					AF000002 /* ActiveTrackTests.xctest */,
+					AF000003 /* ActiveTrackUITests.xctest */,
+				);
+				name = Products;
+				sourceTree = "<group>";
+			};
+			B100000B /* Resources */ = {
 			isa = PBXGroup;
 			children = (
 				AB00000F /* Assets.xcassets */,
 			);
-			path = Resources;
-			sourceTree = "<group>";
-		};
+				path = Resources;
+				sourceTree = "<group>";
+			};
+			B100000C /* ActiveTrackUITests */ = {
+				isa = PBXGroup;
+				children = (
+					AB000016 /* ActiveTrackUITests.swift */,
+				);
+				path = ActiveTrackUITests;
+				sourceTree = "<group>";
+			};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -206,9 +245,9 @@
 			productReference = AF000001;
 			productType = "com.apple.product-type.application";
 		};
-		AE000002 /* ActiveTrackTests */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = B3000002;
+			AE000002 /* ActiveTrackTests */ = {
+				isa = PBXNativeTarget;
+				buildConfigurationList = B3000002;
 			buildPhases = (
 				B4000002 /* Sources */,
 				B0000002 /* Frameworks */,
@@ -220,9 +259,26 @@
 			);
 			name = ActiveTrackTests;
 			productName = ActiveTrackTests;
-			productReference = AF000002;
-			productType = "com.apple.product-type.bundle.unit-test";
-		};
+				productReference = AF000002;
+				productType = "com.apple.product-type.bundle.unit-test";
+			};
+			AE000003 /* ActiveTrackUITests */ = {
+				isa = PBXNativeTarget;
+				buildConfigurationList = B3000004;
+				buildPhases = (
+					B4000003 /* Sources */,
+					B0000003 /* Frameworks */,
+				);
+				buildRules = (
+				);
+				dependencies = (
+					B6000002 /* PBXTargetDependency */,
+				);
+				name = ActiveTrackUITests;
+				productName = ActiveTrackUITests;
+				productReference = AF000003;
+				productType = "com.apple.product-type.bundle.ui-testing";
+			};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -236,11 +292,15 @@
 					AE000001 = {
 						CreatedOnToolsVersion = 15.0;
 					};
-					AE000002 = {
-						CreatedOnToolsVersion = 15.0;
-						TestTargetID = AE000001;
+						AE000002 = {
+							CreatedOnToolsVersion = 15.0;
+							TestTargetID = AE000001;
+						};
+						AE000003 = {
+							CreatedOnToolsVersion = 15.0;
+							TestTargetID = AE000001;
+						};
 					};
-				};
 			};
 			buildConfigurationList = B3000003;
 			compatibilityVersion = "Xcode 14.0";
@@ -254,11 +314,12 @@
 			productRefGroup = B100000A;
 			projectDirPath = "";
 			projectRoot = "";
-			targets = (
-				AE000001 /* ActiveTrack */,
-				AE000002 /* ActiveTrackTests */,
-			);
-		};
+				targets = (
+					AE000001 /* ActiveTrack */,
+					AE000002 /* ActiveTrackTests */,
+					AE000003 /* ActiveTrackUITests */,
+				);
+			};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
@@ -289,29 +350,46 @@
 				AA00000A /* ChartContainerView.swift in Sources */,
 				AA00000B /* DailyChartView.swift in Sources */,
 				AA00000C /* WeeklyChartView.swift in Sources */,
-				AA00000D /* MonthlyChartView.swift in Sources */,
-				AA00000E /* TimeFormatting.swift in Sources */,
-				AA000013 /* ActiveTrackSchema.swift in Sources */,
-			);
+					AA00000D /* MonthlyChartView.swift in Sources */,
+					AA00000E /* TimeFormatting.swift in Sources */,
+						AA000013 /* ActiveTrackSchema.swift in Sources */,
+						AA000014 /* AppPreferences.swift in Sources */,
+						AA000015 /* SettingsView.swift in Sources */,
+						AA000017 /* AppLaunchOptions.swift in Sources */,
+						AA000018 /* UITestHarnessView.swift in Sources */,
+					);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		B4000002 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				AA000010 /* TimerServiceTests.swift in Sources */,
-				AA000011 /* PersistenceServiceTests.swift in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
+			B4000002 /* Sources */ = {
+				isa = PBXSourcesBuildPhase;
+				buildActionMask = 2147483647;
+				files = (
+					AA000010 /* TimerServiceTests.swift in Sources */,
+					AA000011 /* PersistenceServiceTests.swift in Sources */,
+				);
+				runOnlyForDeploymentPostprocessing = 0;
+			};
+			B4000003 /* Sources */ = {
+				isa = PBXSourcesBuildPhase;
+				buildActionMask = 2147483647;
+				files = (
+					AA000016 /* ActiveTrackUITests.swift in Sources */,
+				);
+				runOnlyForDeploymentPostprocessing = 0;
+			};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
-		B6000001 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = AE000001;
-			targetProxy = AC000001;
-		};
+			B6000001 /* PBXTargetDependency */ = {
+				isa = PBXTargetDependency;
+				target = AE000001;
+				targetProxy = AC000001;
+			};
+			B6000002 /* PBXTargetDependency */ = {
+				isa = PBXTargetDependency;
+				target = AE000001;
+				targetProxy = AC000002;
+			};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
@@ -376,7 +454,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-						CURRENT_PROJECT_VERSION = 11;
+						CURRENT_PROJECT_VERSION = 12;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ActiveTrack/Info.plist;
 				INFOPLIST_KEY_LSUIElement = YES;
@@ -385,7 +463,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-						MARKETING_VERSION = 1.2.9;
+						MARKETING_VERSION = 1.2.10;
 				PRODUCT_BUNDLE_IDENTIFIER = com.activetrack.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -402,7 +480,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-						CURRENT_PROJECT_VERSION = 11;
+						CURRENT_PROJECT_VERSION = 12;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ActiveTrack/Info.plist;
 				INFOPLIST_KEY_LSUIElement = YES;
@@ -411,7 +489,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-						MARKETING_VERSION = 1.2.9;
+						MARKETING_VERSION = 1.2.10;
 				PRODUCT_BUNDLE_IDENTIFIER = com.activetrack.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -437,10 +515,10 @@
 			};
 			name = Debug;
 		};
-		C3000002 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
+			C3000002 /* Release */ = {
+				isa = XCBuildConfiguration;
+				buildSettings = {
+					BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -451,9 +529,41 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ActiveTrack.app/Contents/MacOS/ActiveTrack";
+				};
+				name = Release;
 			};
-			name = Release;
-		};
+			C4000001 /* Debug */ = {
+				isa = XCBuildConfiguration;
+				buildSettings = {
+					CODE_SIGN_STYLE = Automatic;
+					CURRENT_PROJECT_VERSION = 1;
+					GENERATE_INFOPLIST_FILE = YES;
+					MACOSX_DEPLOYMENT_TARGET = 14.0;
+					MARKETING_VERSION = 1.0;
+					PRODUCT_BUNDLE_IDENTIFIER = com.activetrack.uitests;
+					PRODUCT_NAME = "$(TARGET_NAME)";
+					SWIFT_EMIT_LOC_STRINGS = NO;
+					SWIFT_VERSION = 5.0;
+					TEST_TARGET_NAME = ActiveTrack;
+				};
+				name = Debug;
+			};
+			C4000002 /* Release */ = {
+				isa = XCBuildConfiguration;
+				buildSettings = {
+					CODE_SIGN_STYLE = Automatic;
+					CURRENT_PROJECT_VERSION = 1;
+					GENERATE_INFOPLIST_FILE = YES;
+					MACOSX_DEPLOYMENT_TARGET = 14.0;
+					MARKETING_VERSION = 1.0;
+					PRODUCT_BUNDLE_IDENTIFIER = com.activetrack.uitests;
+					PRODUCT_NAME = "$(TARGET_NAME)";
+					SWIFT_EMIT_LOC_STRINGS = NO;
+					SWIFT_VERSION = 5.0;
+					TEST_TARGET_NAME = ActiveTrack;
+				};
+				name = Release;
+			};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -475,15 +585,24 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		B3000003 /* Build configuration list for PBXProject "ActiveTrack" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				C1000001 /* Debug */,
-				C1000002 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
+			B3000003 /* Build configuration list for PBXProject "ActiveTrack" */ = {
+				isa = XCConfigurationList;
+				buildConfigurations = (
+					C1000001 /* Debug */,
+					C1000002 /* Release */,
+				);
+				defaultConfigurationIsVisible = 0;
+				defaultConfigurationName = Release;
+			};
+			B3000004 /* Build configuration list for PBXNativeTarget "ActiveTrackUITests" */ = {
+				isa = XCConfigurationList;
+				buildConfigurations = (
+					C4000001 /* Debug */,
+					C4000002 /* Release */,
+				);
+				defaultConfigurationIsVisible = 0;
+				defaultConfigurationName = Release;
+			};
 /* End XCConfigurationList section */
 	};
 	rootObject = AD000001;

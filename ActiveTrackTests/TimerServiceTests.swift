@@ -460,6 +460,30 @@ final class TimerServiceTests: XCTestCase {
         XCTAssertEqual(timer.displayTime, 0, accuracy: 1)
     }
 
+    func testSleepDoesNotPauseWhenPreferenceDisabled() {
+        defaults.set(false, forKey: AppPreferenceKey.pauseOnSleep)
+        timer.start()
+
+        timer.handleSleep()
+
+        XCTAssertTrue(timer.isRunning)
+        XCTAssertNotNil(persistence.fetchOpenInterval())
+    }
+
+    func testWakeResumesWhenPreferenceEnabled() {
+        defaults.set(true, forKey: AppPreferenceKey.pauseOnSleep)
+        defaults.set(true, forKey: AppPreferenceKey.resumeAfterWake)
+        timer.start()
+
+        timer.handleSleep()
+        XCTAssertFalse(timer.isRunning)
+
+        timer.handleWake()
+
+        XCTAssertTrue(timer.isRunning)
+        XCTAssertNotNil(persistence.fetchOpenInterval())
+    }
+
     func testWakeRefreshesTodayTotal() {
         // Start, pause to create a completed interval
         timer.start()
@@ -507,6 +531,20 @@ final class TimerServiceTests: XCTestCase {
         XCTAssertGreaterThan(timer.todayTotal, 0,
                              "Completed intervals should persist through sleep/wake")
         XCTAssertFalse(timer.isRunning, "Timer should still be paused after wake")
+    }
+
+    func testTimeStringUsesTwentyFourHourPreference() {
+        let calendar = Calendar(identifier: .gregorian)
+        let date = calendar.date(from: DateComponents(year: 2026, month: 4, day: 10, hour: 13, minute: 5))!
+
+        XCTAssertEqual(date.timeString(using: .twentyFourHour), "13:05")
+    }
+
+    func testTimeStringUsesTwelveHourPreference() {
+        let calendar = Calendar(identifier: .gregorian)
+        let date = calendar.date(from: DateComponents(year: 2026, month: 4, day: 10, hour: 13, minute: 5))!
+
+        XCTAssertEqual(date.timeString(using: .twelveHour), "1:05 PM")
     }
 
     // MARK: - Display Time Accuracy

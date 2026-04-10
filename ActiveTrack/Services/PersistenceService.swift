@@ -136,6 +136,18 @@ private struct IntervalRecord: Sendable {
     let endDate: Date?
 }
 
+private struct IntervalExportRecord: Codable {
+    let startDate: Date
+    let endDate: Date?
+    let durationSeconds: Int?
+    let isOpen: Bool
+}
+
+private struct IntervalExportPayload: Codable {
+    let exportedAt: Date
+    let intervals: [IntervalExportRecord]
+}
+
 private struct StartupCheckResult {
     let warning: String?
     let isDaySummaryReady: Bool
@@ -931,7 +943,156 @@ final class PersistenceService {
         return await asyncReader?.intervalsForDay(date) ?? []
     }
 
+    func exportJSON() throws -> Data {
+        let payload = IntervalExportPayload(
+            exportedAt: .now,
+            intervals: fetchAllSnapshots().map { snapshot in
+                IntervalExportRecord(
+                    startDate: snapshot.startDate,
+                    endDate: snapshot.endDate,
+                    durationSeconds: snapshot.endDate.map { Int(max($0.timeIntervalSince(snapshot.startDate), 0)) },
+                    isOpen: snapshot.endDate == nil
+                )
+            }
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(payload)
+    }
+
+    func exportCSV() throws -> Data {
+        let iso8601 = ISO8601DateFormatter()
+        let rows = ["start,end,duration_seconds,is_open"] + fetchAllSnapshots().map { snapshot in
+            let start = csvField(iso8601.string(from: snapshot.startDate))
+            let end = csvField(snapshot.endDate.map(iso8601.string) ?? "")
+            let duration = snapshot.endDate.map { String(Int(max($0.timeIntervalSince(snapshot.startDate), 0))) } ?? ""
+            let isOpen = snapshot.endDate == nil ? "true" : "false"
+            return [start, end, duration, isOpen].joined(separator: ",")
+        }
+
+        guard let data = rows.joined(separator: "\n").data(using: .utf8) else {
+            throw PersistenceError.saveFailed(underlying: "Failed to encode CSV export.")
+        }
+        return data
+    }
+
+    func backupsDirectoryURL() throws -> URL {
+        guard let databaseURL else {
+            throw PersistenceError.saveFailed(underlying: "Backups are unavailable while ActiveTrack is using an in-memory store.")
+        }
+
+        let backupsURL = databaseURL.deletingLastPathComponent().appendingPathComponent("Backups", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: backupsURL.path) {
+            try FileManager.default.createDirectory(at: backupsURL, withIntermediateDirectories: true)
+        }
+        return backupsURL
+    }
+
+    @discardableResult
+    func createBackupNow(now: Date = .now, userDefaults: UserDefaults = .standard) throws -> URL {
+        let backupURL = try createBackup(now: now)
+        AppPreferences.setLastBackupDate(now, userDefaults: userDefaults)
+        return backupURL
+    }
+
+    @discardableResult
+    func createAutomaticBackupIfNeeded(now: Date = .now, userDefaults: UserDefaults = .standard) throws -> URL? {
+        guard AppPreferences.automaticBackupsEnabled(userDefaults: userDefaults) else { return nil }
+        if let lastBackupDate = AppPreferences.lastBackupDate(userDefaults: userDefaults),
+           now.timeIntervalSince(lastBackupDate) < 86_400 {
+            return nil
+        }
+
+        let backupURL = try createBackup(now: now)
+        AppPreferences.setLastBackupDate(now, userDefaults: userDefaults)
+        HealthLog.event("automatic_backup_created", metadata: ["filename": backupURL.lastPathComponent])
+        return backupURL
+    }
+
     // MARK: - Private Helpers
+
+    private func createBackup(now: Date) throws -> URL {
+        let backupsURL = try backupsDirectoryURL()
+        let backupURL = backupsURL.appendingPathComponent("ActiveTrack-backup-\(backupTimestamp(now)).sqlite")
+        if FileManager.default.fileExists(atPath: backupURL.path) {
+            try FileManager.default.removeItem(at: backupURL)
+        }
+
+        do {
+            try createSQLiteBackup(at: backupURL)
+            try trimBackups()
+            return backupURL
+        } catch {
+            try? FileManager.default.removeItem(at: backupURL)
+            throw error
+        }
+    }
+
+    private func createSQLiteBackup(at destinationURL: URL) throws {
+        guard let databaseURL else {
+            throw PersistenceError.saveFailed(underlying: "Backups are unavailable while ActiveTrack is using an in-memory store.")
+        }
+
+        var sourceDB: OpaquePointer?
+        var destinationDB: OpaquePointer?
+
+        guard sqlite3_open_v2(databaseURL.path, &sourceDB, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            throw PersistenceError.saveFailed(underlying: sqliteErrorMessage(from: sourceDB, defaultMessage: "Couldn't open the current store for backup."))
+        }
+        defer { sqlite3_close(sourceDB) }
+
+        guard sqlite3_open(destinationURL.path, &destinationDB) == SQLITE_OK else {
+            throw PersistenceError.saveFailed(underlying: sqliteErrorMessage(from: destinationDB, defaultMessage: "Couldn't create the backup store."))
+        }
+        defer { sqlite3_close(destinationDB) }
+
+        guard let backup = sqlite3_backup_init(destinationDB, "main", sourceDB, "main") else {
+            throw PersistenceError.saveFailed(underlying: sqliteErrorMessage(from: destinationDB, defaultMessage: "Couldn't start SQLite backup."))
+        }
+        defer { sqlite3_backup_finish(backup) }
+
+        guard sqlite3_backup_step(backup, -1) == SQLITE_DONE else {
+            throw PersistenceError.saveFailed(underlying: sqliteErrorMessage(from: destinationDB, defaultMessage: "SQLite backup did not finish successfully."))
+        }
+    }
+
+    private func trimBackups(keeping maxCount: Int = 20) throws {
+        let backupsURL = try backupsDirectoryURL()
+        let backupURLs = try FileManager.default.contentsOfDirectory(
+            at: backupsURL,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        )
+        let sortedBackups = try backupURLs.sorted { lhs, rhs in
+            let lhsDate = try lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate ?? .distantPast
+            let rhsDate = try rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate ?? .distantPast
+            return lhsDate > rhsDate
+        }
+
+        guard sortedBackups.count > maxCount else { return }
+        for backupURL in sortedBackups.dropFirst(maxCount) {
+            try? FileManager.default.removeItem(at: backupURL)
+        }
+    }
+
+    private func backupTimestamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        return formatter.string(from: date)
+    }
+
+    private func csvField(_ value: String) -> String {
+        let escaped = value.replacingOccurrences(of: "\"", with: "\"\"")
+        return "\"\(escaped)\""
+    }
+
+    private func sqliteErrorMessage(from db: OpaquePointer?, defaultMessage: String) -> String {
+        guard let db else { return defaultMessage }
+        return String(cString: sqlite3_errmsg(db))
+    }
 
     private func buildChartData(
         days: Int,

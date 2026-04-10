@@ -122,6 +122,7 @@ final class TimerService {
     private var wakeObserver: Any?
     private var targetReferenceDay: Date?
     private var reachedTargetReferenceDay: Date?
+    private var shouldResumeAfterWake = false
 
     var currentIntervalElapsed: TimeInterval {
         _ = displayRefreshVersion
@@ -391,6 +392,11 @@ final class TimerService {
     // Internal for @testable access in tests
     func handleSleep() {
         HealthLog.event("system_sleep")
+        guard AppPreferences.pauseOnSleepEnabled(userDefaults: userDefaults) else {
+            shouldResumeAfterWake = false
+            return
+        }
+        shouldResumeAfterWake = isRunning && AppPreferences.resumeAfterWakeEnabled(userDefaults: userDefaults)
         pause()
     }
 
@@ -403,6 +409,11 @@ final class TimerService {
         refreshDisplayUpdates()
         notifyDisplayTimeDidChange()
         notifyStatusDidChange()
+
+        if shouldResumeAfterWake {
+            shouldResumeAfterWake = false
+            start()
+        }
     }
 
     func resetToday() {

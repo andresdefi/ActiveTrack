@@ -46,12 +46,37 @@ extension Date {
         return formatter
     }()
 
+    private static let twentyFourHourFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
+    private static let twelveHourFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "h:mm a"
+        return formatter
+    }()
+
     var shortDateString: String {
         Self.shortDateFormatter.string(from: self)
     }
 
     var timeString: String {
-        Self.timeFormatter.string(from: self)
+        timeString(using: AppPreferences.timeDisplayPreference())
+    }
+
+    func timeString(using preference: TimeDisplayPreference) -> String {
+        switch preference {
+        case .system:
+            return Self.timeFormatter.string(from: self)
+        case .twentyFourHour:
+            return Self.twentyFourHourFormatter.string(from: self)
+        case .twelveHour:
+            return Self.twelveHourFormatter.string(from: self)
+        }
     }
 
     var weekOfYear: Int {

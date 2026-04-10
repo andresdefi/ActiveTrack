@@ -722,6 +722,95 @@ final class PersistenceServiceTests: XCTestCase {
         XCTAssertEqual(journalMode?.lowercased(), "wal")
     }
 
+    func testExportJSONIncludesIntervals() throws {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        context.insert(
+            ActiveInterval(
+                startDate: calendar.date(bySettingHour: 9, minute: 0, second: 0, of: today)!,
+                endDate: calendar.date(bySettingHour: 10, minute: 30, second: 0, of: today)!
+            )
+        )
+        try context.save()
+
+        let data = try service.exportJSON()
+        let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let intervals = payload?["intervals"] as? [[String: Any]]
+
+        XCTAssertEqual(intervals?.count, 1)
+        XCTAssertEqual(intervals?.first?["durationSeconds"] as? Int, 5400)
+        XCTAssertEqual(intervals?.first?["isOpen"] as? Bool, false)
+    }
+
+    func testExportCSVIncludesHeaderAndRow() throws {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        context.insert(
+            ActiveInterval(
+                startDate: calendar.date(bySettingHour: 8, minute: 0, second: 0, of: today)!,
+                endDate: calendar.date(bySettingHour: 8, minute: 45, second: 0, of: today)!
+            )
+        )
+        try context.save()
+
+        let data = try service.exportCSV()
+        let csv = try XCTUnwrap(String(data: data, encoding: .utf8))
+
+        XCTAssertTrue(csv.contains("start,end,duration_seconds,is_open"))
+        XCTAssertTrue(csv.contains(",2700,false"))
+    }
+
+    func testCreateBackupNowCreatesSQLiteSnapshot() throws {
+        let (sqliteService, _, directory) = try makeSQLiteService()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        let interval = try sqliteService.createInterval(
+            startDate: calendar.date(bySettingHour: 9, minute: 0, second: 0, of: today)!
+        )
+        try sqliteService.closeInterval(
+            interval,
+            endDate: calendar.date(bySettingHour: 10, minute: 0, second: 0, of: today)!
+        )
+
+        let backupURL = try sqliteService.createBackupNow()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backupURL.path))
+
+        try withDatabase(at: backupURL) { db in
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM ZACTIVEINTERVAL", -1, &statement, nil) == SQLITE_OK else {
+                throw XCTSkip("Failed to inspect backup contents")
+            }
+            defer { sqlite3_finalize(statement) }
+
+            XCTAssertEqual(sqlite3_step(statement), SQLITE_ROW)
+            XCTAssertEqual(sqlite3_column_int(statement, 0), 1)
+        }
+    }
+
+    func testAutomaticBackupSkipsWhenRecentBackupExists() throws {
+        let (sqliteService, _, directory) = try makeSQLiteService()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let suiteName = "ActiveTrackBackupTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let firstBackup = try sqliteService.createAutomaticBackupIfNeeded(
+            now: Date(timeIntervalSinceReferenceDate: 1000),
+            userDefaults: defaults
+        )
+        let secondBackup = try sqliteService.createAutomaticBackupIfNeeded(
+            now: Date(timeIntervalSinceReferenceDate: 2000),
+            userDefaults: defaults
+        )
+
+        XCTAssertNotNil(firstBackup)
+        XCTAssertNil(secondBackup)
+    }
+
     func testSQLiteUpdateIntervalMatchingSummaryAdjustsPersistedInterval() throws {
         let (sqliteService, _, directory) = try makeSQLiteService()
         defer { try? FileManager.default.removeItem(at: directory) }
