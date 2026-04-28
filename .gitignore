@@ -24,3 +24,8 @@ Pods/
 *.swp
 *.lock
 *~.nib
+
+# Local tooling and generated artifacts
+.serena/
+*.profraw
+*.zip
