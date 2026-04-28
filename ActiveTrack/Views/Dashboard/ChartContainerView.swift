@@ -12,8 +12,7 @@ enum AggregateChartMetric: String, CaseIterable {
 }
 
 struct ChartContainerView: View {
-    let timerService: TimerService
-    let historyStore: DashboardHistoryStore
+    let displaySnapshot: DashboardDisplaySnapshot
 
     @State private var selectedPeriod: ChartPeriod = .daily
     @State private var aggregateMetric: AggregateChartMetric = .total
@@ -39,10 +38,9 @@ struct ChartContainerView: View {
                     .frame(maxWidth: 240)
                 }
 
-                DashboardMetricsGrid(timerService: timerService, chartData: historyStore.chartData)
+                DashboardMetricsGrid(displaySnapshot: displaySnapshot)
                 SelectedHistoryChart(
-                    timerService: timerService,
-                    chartData: historyStore.chartData,
+                    chartData: displaySnapshot.chartData,
                     selectedPeriod: selectedPeriod,
                     aggregateMetric: aggregateMetric
                 )
@@ -53,45 +51,35 @@ struct ChartContainerView: View {
 }
 
 private struct DashboardMetricsGrid: View {
-    let timerService: TimerService
-    let chartData: HistoryChartData
+    let displaySnapshot: DashboardDisplaySnapshot
 
     var body: some View {
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-            LiveTodayDashboardMetricCard(timerService: timerService)
+            DashboardMetricCard(
+                title: "Today",
+                value: displaySnapshot.todayText,
+                caption: displaySnapshot.todayCaption
+            )
             DashboardMetricCard(
                 title: "Average / Day",
-                value: HistoryChartOverlay.averageDuration(for: displayedDailyData).formattedHoursMinutes,
+                value: displaySnapshot.averageDailyText,
                 caption: "Across the last 14 days"
             )
             DashboardMetricCard(
                 title: "Average / Week",
-                value: HistoryChartOverlay.averageDuration(for: displayedWeeklyData).formattedHoursMinutes,
+                value: displaySnapshot.averageWeeklyText,
                 caption: "Across the last 12 weeks"
             )
             DashboardMetricCard(
                 title: "Average / Month",
-                value: HistoryChartOverlay.averageDuration(for: displayedMonthlyData).formattedHoursMinutes,
+                value: displaySnapshot.averageMonthlyText,
                 caption: "Across the last 12 months"
             )
         }
     }
-
-    private var displayedDailyData: [DailyTotal] {
-        HistoryChartOverlay.overlayDailyTotals(chartData.daily, timerService: timerService)
-    }
-
-    private var displayedWeeklyData: [WeeklyTotal] {
-        HistoryChartOverlay.overlayWeeklyTotals(chartData.weekly, timerService: timerService)
-    }
-
-    private var displayedMonthlyData: [MonthlyTotal] {
-        HistoryChartOverlay.overlayMonthlyTotals(chartData.monthly, timerService: timerService)
-    }
 }
 
 private struct SelectedHistoryChart: View {
-    let timerService: TimerService
     let chartData: HistoryChartData
     let selectedPeriod: ChartPeriod
     let aggregateMetric: AggregateChartMetric
@@ -99,102 +87,18 @@ private struct SelectedHistoryChart: View {
     var body: some View {
         switch selectedPeriod {
         case .daily:
-            DailyChartView(data: HistoryChartOverlay.overlayDailyTotals(chartData.daily, timerService: timerService))
+            DailyChartView(data: chartData.daily)
         case .weekly:
             WeeklyChartView(
-                data: HistoryChartOverlay.overlayWeeklyTotals(chartData.weekly, timerService: timerService),
+                data: chartData.weekly,
                 metric: aggregateMetric
             )
         case .monthly:
             MonthlyChartView(
-                data: HistoryChartOverlay.overlayMonthlyTotals(chartData.monthly, timerService: timerService),
+                data: chartData.monthly,
                 metric: aggregateMetric
             )
         }
-    }
-}
-
-@MainActor
-private enum HistoryChartOverlay {
-    static func overlayDailyTotals(_ items: [DailyTotal], timerService: TimerService) -> [DailyTotal] {
-        let runningElapsed = liveOverlayDuration(displaySnapshot: timerService.displaySnapshot)
-        guard runningElapsed > 0 else { return items }
-        let today = Calendar.current.startOfDay(for: .now)
-        if let dailyIndex = items.firstIndex(where: { $0.date == today }) {
-            var updated = items
-            updated[dailyIndex] = DailyTotal(date: today, duration: updated[dailyIndex].duration + runningElapsed)
-            return updated
-        }
-        return items
-    }
-
-    static func overlayWeeklyTotals(_ items: [WeeklyTotal], timerService: TimerService) -> [WeeklyTotal] {
-        let runningElapsed = liveOverlayDuration(displaySnapshot: timerService.displaySnapshot)
-        guard runningElapsed > 0 else { return items }
-
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: .now)
-        let weekStart = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: today))
-        if let weekStart, let weeklyIndex = items.firstIndex(where: { $0.weekStart == weekStart }) {
-            var updated = items
-            updated[weeklyIndex] = WeeklyTotal(
-                weekStart: weekStart,
-                duration: updated[weeklyIndex].duration + runningElapsed
-            )
-            return updated
-        }
-        return items
-    }
-
-    static func overlayMonthlyTotals(_ items: [MonthlyTotal], timerService: TimerService) -> [MonthlyTotal] {
-        let runningElapsed = liveOverlayDuration(displaySnapshot: timerService.displaySnapshot)
-        guard runningElapsed > 0 else { return items }
-
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: .now)
-        let monthStart = calendar.date(from: calendar.dateComponents([.year, .month], from: today))
-        if let monthStart, let monthlyIndex = items.firstIndex(where: { $0.monthStart == monthStart }) {
-            var updated = items
-            updated[monthlyIndex] = MonthlyTotal(
-                monthStart: monthStart,
-                duration: updated[monthlyIndex].duration + runningElapsed
-            )
-            return updated
-        }
-        return items
-    }
-
-    static func averageDuration<T>(for items: [T]) -> TimeInterval where T: DurationReadable {
-        guard !items.isEmpty else { return 0 }
-        let total = items.reduce(0) { $0 + $1.duration }
-        return total / Double(items.count)
-    }
-
-    private static func liveOverlayDuration(displaySnapshot: TimerDisplaySnapshot) -> TimeInterval {
-        guard displaySnapshot.isRunning else { return 0 }
-        return displaySnapshot.currentIntervalElapsed
-    }
-}
-
-private protocol DurationReadable {
-    var duration: TimeInterval { get }
-}
-
-extension DailyTotal: DurationReadable {}
-extension WeeklyTotal: DurationReadable {}
-extension MonthlyTotal: DurationReadable {}
-
-private struct LiveTodayDashboardMetricCard: View {
-    let timerService: TimerService
-
-    var body: some View {
-        let displaySnapshot = timerService.displaySnapshot
-
-        DashboardMetricCard(
-            title: "Today",
-            value: displaySnapshot.fullText,
-            caption: displaySnapshot.isRunning ? "Live total including current session" : "Tracked so far today"
-        )
     }
 }
 

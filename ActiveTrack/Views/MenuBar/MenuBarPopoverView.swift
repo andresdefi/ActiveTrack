@@ -7,7 +7,7 @@ struct MenuBarPopoverView: View {
     @Environment(\.openWindow) private var openWindow
     @AppStorage("lastSeenReleaseNotesVersion") private var lastSeenReleaseNotesVersion = ""
     @State private var showingWhatsNew = false
-    private let currentReleaseNotesVersion = "1.2.11"
+    private let currentReleaseNotesVersion = "1.2.12"
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
@@ -124,9 +124,9 @@ struct MenuBarPopoverView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("What's New in \(currentReleaseNotesVersion)")
                 .font(.title3.bold())
-            Text("• Cached timer display snapshots so menu bar and dashboard updates do less repeated formatting work")
-            Text("• Kept live dashboard overlays tied to the lightweight timer snapshot path")
-            Text("• Added regression tests for timer display snapshot updates")
+            Text("• Cached dashboard display snapshots so chart and sidebar overlays do less repeated work")
+            Text("• Added dashboard telemetry for history reload, persistence apply, and snapshot rebuild timing")
+            Text("• Added regression coverage for live dashboard overlay totals")
             HStack {
                 Spacer()
                 Button("Done") {

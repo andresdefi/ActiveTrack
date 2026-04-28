@@ -1,4 +1,7 @@
 import SwiftUI
+import OSLog
+
+private let dashboardLogger = Logger(subsystem: "com.activetrack.app", category: "Dashboard")
 
 private enum DashboardSelection: Hashable {
     case overview
@@ -14,6 +17,172 @@ struct DashboardMonthSection: Identifiable, Sendable {
     var id: Date { monthStart }
 }
 
+struct DashboardDisplaySnapshot: Sendable {
+    static let empty = DashboardDisplaySnapshot(
+        chartData: HistoryChartData(daily: [], weekly: [], monthly: []),
+        monthSections: [],
+        dayDurations: [:],
+        timerDisplay: TimerDisplaySnapshot(isRunning: false, displayTime: 0, currentIntervalElapsed: 0)
+    )
+
+    let chartData: HistoryChartData
+    let monthSections: [DashboardMonthSection]
+    let dayDurations: [Date: TimeInterval]
+    let todayText: String
+    let todayCaption: String
+    let averageDailyText: String
+    let averageWeeklyText: String
+    let averageMonthlyText: String
+
+    init(
+        chartData: HistoryChartData,
+        monthSections: [DashboardMonthSection],
+        dayDurations: [Date: TimeInterval],
+        timerDisplay: TimerDisplaySnapshot
+    ) {
+        let liveDuration = timerDisplay.isRunning ? timerDisplay.currentIntervalElapsed : 0
+        let overlaidChartData = Self.overlayChartData(chartData, liveDuration: liveDuration)
+        let overlaidDayDurations = Self.overlayDayDurations(dayDurations, liveDuration: liveDuration)
+
+        self.chartData = overlaidChartData
+        self.monthSections = Self.overlayMonthSections(
+            monthSections,
+            dayDurations: overlaidDayDurations
+        )
+        self.dayDurations = overlaidDayDurations
+        self.todayText = timerDisplay.fullText
+        self.todayCaption = timerDisplay.isRunning ? "Live total including current session" : "Tracked so far today"
+        self.averageDailyText = Self.averageDuration(for: overlaidChartData.daily).formattedHoursMinutes
+        self.averageWeeklyText = Self.averageDuration(for: overlaidChartData.weekly).formattedHoursMinutes
+        self.averageMonthlyText = Self.averageDuration(for: overlaidChartData.monthly).formattedHoursMinutes
+    }
+
+    private static func overlayChartData(_ chartData: HistoryChartData, liveDuration: TimeInterval) -> HistoryChartData {
+        guard liveDuration > 0 else { return chartData }
+        return HistoryChartData(
+            daily: overlayDailyTotals(chartData.daily, liveDuration: liveDuration),
+            weekly: overlayWeeklyTotals(chartData.weekly, liveDuration: liveDuration),
+            monthly: overlayMonthlyTotals(chartData.monthly, liveDuration: liveDuration)
+        )
+    }
+
+    private static func overlayDailyTotals(_ items: [DailyTotal], liveDuration: TimeInterval) -> [DailyTotal] {
+        let today = Calendar.current.startOfDay(for: .now)
+        guard let dailyIndex = items.firstIndex(where: { $0.date == today }) else { return items }
+        var updated = items
+        updated[dailyIndex] = DailyTotal(date: today, duration: updated[dailyIndex].duration + liveDuration)
+        return updated
+    }
+
+    private static func overlayWeeklyTotals(_ items: [WeeklyTotal], liveDuration: TimeInterval) -> [WeeklyTotal] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        guard let weekStart = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: today)),
+              let weeklyIndex = items.firstIndex(where: { $0.weekStart == weekStart }) else {
+            return items
+        }
+        var updated = items
+        updated[weeklyIndex] = WeeklyTotal(
+            weekStart: weekStart,
+            duration: updated[weeklyIndex].duration + liveDuration
+        )
+        return updated
+    }
+
+    private static func overlayMonthlyTotals(_ items: [MonthlyTotal], liveDuration: TimeInterval) -> [MonthlyTotal] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        guard let monthStart = calendar.date(from: calendar.dateComponents([.year, .month], from: today)),
+              let monthlyIndex = items.firstIndex(where: { $0.monthStart == monthStart }) else {
+            return items
+        }
+        var updated = items
+        updated[monthlyIndex] = MonthlyTotal(
+            monthStart: monthStart,
+            duration: updated[monthlyIndex].duration + liveDuration
+        )
+        return updated
+    }
+
+    private static func overlayDayDurations(
+        _ dayDurations: [Date: TimeInterval],
+        liveDuration: TimeInterval
+    ) -> [Date: TimeInterval] {
+        let today = Calendar.current.startOfDay(for: .now)
+        let todayTotal = (dayDurations[today] ?? 0) + liveDuration
+
+        var overlaidDurations = dayDurations
+        if todayTotal > 0.000_001 {
+            overlaidDurations[today] = todayTotal
+        } else {
+            overlaidDurations.removeValue(forKey: today)
+        }
+        return overlaidDurations
+    }
+
+    private static func overlayMonthSections(
+        _ sections: [DashboardMonthSection],
+        dayDurations: [Date: TimeInterval]
+    ) -> [DashboardMonthSection] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        guard let currentMonth = calendar.date(from: calendar.dateComponents([.year, .month], from: today)) else {
+            return sections
+        }
+
+        var overlaidSections = sections
+        let todayTotal = dayDurations[today] ?? 0
+        let persistedSection = sections.first(where: { $0.id == currentMonth })
+        var monthDays = persistedSection?.days ?? []
+
+        if todayTotal > 0.000_001 {
+            if !monthDays.contains(today) {
+                monthDays.append(today)
+                monthDays.sort(by: >)
+            }
+        } else {
+            monthDays.removeAll { $0 == today }
+        }
+
+        if monthDays.isEmpty {
+            overlaidSections.removeAll { $0.id == currentMonth }
+            return overlaidSections
+        }
+
+        let total = monthDays.reduce(0) { partial, day in
+            partial + (dayDurations[day] ?? 0)
+        }
+        let updatedSection = DashboardMonthSection(
+            monthStart: currentMonth,
+            title: currentMonth.monthYearString,
+            average: total / Double(monthDays.count),
+            days: monthDays
+        )
+
+        if let sectionIndex = overlaidSections.firstIndex(where: { $0.id == currentMonth }) {
+            overlaidSections[sectionIndex] = updatedSection
+        } else {
+            overlaidSections.append(updatedSection)
+            overlaidSections.sort { $0.monthStart > $1.monthStart }
+        }
+        return overlaidSections
+    }
+
+    private static func averageDuration<T>(for items: [T]) -> TimeInterval where T: DashboardDurationReadable {
+        guard !items.isEmpty else { return 0 }
+        let total = items.reduce(0) { $0 + $1.duration }
+        return total / Double(items.count)
+    }
+}
+
+private protocol DashboardDurationReadable {
+    var duration: TimeInterval { get }
+}
+
+extension DailyTotal: DashboardDurationReadable {}
+extension WeeklyTotal: DashboardDurationReadable {}
+extension MonthlyTotal: DashboardDurationReadable {}
+
 @MainActor
 @Observable
 final class DashboardHistoryStore {
@@ -25,7 +194,13 @@ final class DashboardHistoryStore {
     private(set) var dayDurations: [Date: TimeInterval] = [:]
     private(set) var chartData = HistoryChartData(daily: [], weekly: [], monthly: [])
     private(set) var monthSections: [DashboardMonthSection] = []
+    private(set) var displaySnapshot = DashboardDisplaySnapshot.empty
     private var hasLoaded = false
+    private var latestTimerDisplaySnapshot = TimerDisplaySnapshot(
+        isRunning: false,
+        displayTime: 0,
+        currentIntervalElapsed: 0
+    )
 
     init(persistenceService: PersistenceService) {
         self.persistenceService = persistenceService
@@ -37,6 +212,8 @@ final class DashboardHistoryStore {
     }
 
     func reload() async {
+        let startedAt = Date.now
+        dashboardLogger.info("Dashboard history reload started")
         let snapshot = await persistenceService.dashboardHistorySnapshotAsync(
             days: Self.chartDays,
             weeks: Self.chartWeeks,
@@ -44,9 +221,17 @@ final class DashboardHistoryStore {
         )
         apply(snapshot)
         hasLoaded = true
+        dashboardLogger.info(
+            "Dashboard history reload finished days=\(snapshot.dayDurations.count, privacy: .public) elapsed_ms=\(Self.elapsedMilliseconds(since: startedAt), privacy: .public)"
+        )
     }
 
     func apply(_ change: PersistenceChange) async {
+        let startedAt = Date.now
+        dashboardLogger.info(
+            "Dashboard persistence change received full_reload=\(change.requiresFullReload, privacy: .public) affected_days=\(change.affectedDays.count, privacy: .public)"
+        )
+
         if change.requiresFullReload || !hasLoaded {
             await reload()
             return
@@ -65,12 +250,21 @@ final class DashboardHistoryStore {
         }
 
         apply(dayDurations: nextDurations, affectedDays: change.affectedDays)
+        dashboardLogger.info(
+            "Dashboard persistence change applied affected_days=\(change.affectedDays.count, privacy: .public) elapsed_ms=\(Self.elapsedMilliseconds(since: startedAt), privacy: .public)"
+        )
+    }
+
+    func updateDisplaySnapshot(timerDisplaySnapshot: TimerDisplaySnapshot) {
+        latestTimerDisplaySnapshot = timerDisplaySnapshot
+        rebuildDisplaySnapshot(reason: "timer")
     }
 
     private func apply(_ snapshot: DashboardHistorySnapshot) {
         dayDurations = snapshot.dayDurations
         chartData = snapshot.chartData
         monthSections = Self.buildMonthSections(from: snapshot.dayDurations)
+        rebuildDisplaySnapshot(reason: "reload")
     }
 
     private func apply(dayDurations: [Date: TimeInterval], affectedDays: Set<Date>) {
@@ -87,6 +281,20 @@ final class DashboardHistoryStore {
             monthSections,
             from: dayDurations,
             affectedDays: affectedDays
+        )
+        rebuildDisplaySnapshot(reason: "persistence")
+    }
+
+    private func rebuildDisplaySnapshot(reason: String) {
+        let startedAt = Date.now
+        displaySnapshot = DashboardDisplaySnapshot(
+            chartData: chartData,
+            monthSections: monthSections,
+            dayDurations: dayDurations,
+            timerDisplay: latestTimerDisplaySnapshot
+        )
+        dashboardLogger.debug(
+            "Dashboard display snapshot rebuilt reason=\(reason, privacy: .public) days=\(self.displaySnapshot.dayDurations.count, privacy: .public) elapsed_ms=\(Self.elapsedMilliseconds(since: startedAt), privacy: .public)"
         )
     }
 
@@ -196,6 +404,10 @@ final class DashboardHistoryStore {
     private static func monthStart(for day: Date, calendar: Calendar) -> Date? {
         calendar.date(from: calendar.dateComponents([.year, .month], from: day))
     }
+
+    private static func elapsedMilliseconds(since startedAt: Date) -> Int {
+        Int(Date.now.timeIntervalSince(startedAt) * 1000)
+    }
 }
 
 struct DashboardView: View {
@@ -233,9 +445,7 @@ struct DashboardView: View {
         } else {
             NavigationSplitView(columnVisibility: $splitVisibility) {
                 DashboardSidebarView(
-                    timerService: timerService,
-                    monthSections: historyStore.monthSections,
-                    dayDurations: historyStore.dayDurations,
+                    displaySnapshot: historyStore.displaySnapshot,
                     selectedItem: $selectedItem,
                     expandedMonths: $expandedMonths,
                     splitVisibility: $splitVisibility
@@ -244,7 +454,7 @@ struct DashboardView: View {
             } detail: {
                 switch selectedItem {
                 case .overview:
-                    ChartContainerView(timerService: timerService, historyStore: historyStore)
+                    ChartContainerView(displaySnapshot: historyStore.displaySnapshot)
                 case .day(let day):
                     DayDetailView(day: day, timerService: timerService, persistenceService: persistenceService)
                 }
@@ -252,7 +462,14 @@ struct DashboardView: View {
             .navigationTitle("ActiveTrack")
             .accessibilityIdentifier("activeTrack.dashboardRoot")
             .task {
+                historyStore.updateDisplaySnapshot(timerDisplaySnapshot: timerService.displaySnapshot)
                 await historyStore.reloadIfNeeded()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .activeTrackDisplayTimeChanged)) { _ in
+                historyStore.updateDisplaySnapshot(timerDisplaySnapshot: timerService.displaySnapshot)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .activeTrackTimerStatusChanged)) { _ in
+                historyStore.updateDisplaySnapshot(timerDisplaySnapshot: timerService.displaySnapshot)
             }
             .onReceive(NotificationCenter.default.publisher(for: .activeTrackPersistenceDidChange)) { notification in
                 Task {
@@ -277,16 +494,14 @@ struct DashboardView: View {
 }
 
 private struct DashboardSidebarView: View {
-    let timerService: TimerService
-    let monthSections: [DashboardMonthSection]
-    let dayDurations: [Date: TimeInterval]
+    let displaySnapshot: DashboardDisplaySnapshot
 
     @Binding var selectedItem: DashboardSelection
     @Binding var expandedMonths: Set<Date>
     @Binding var splitVisibility: NavigationSplitViewVisibility
 
     private var displayedMonthSections: [DashboardMonthSection] {
-        applyLiveTodayOverlay(to: monthSections)
+        displaySnapshot.monthSections
     }
 
     var body: some View {
@@ -365,60 +580,8 @@ private struct DashboardSidebarView: View {
         }
     }
 
-    private func applyLiveTodayOverlay(to sections: [DashboardMonthSection]) -> [DashboardMonthSection] {
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: .now)
-        guard let currentMonth = calendar.date(from: calendar.dateComponents([.year, .month], from: today)) else {
-            return sections
-        }
-
-        var overlaidSections = sections
-        let displaySnapshot = timerService.displaySnapshot
-        let liveDuration = displaySnapshot.isRunning ? displaySnapshot.currentIntervalElapsed : 0
-        let todayTotal = (dayDurations[today] ?? 0) + liveDuration
-
-        let persistedSection = sections.first(where: { $0.id == currentMonth })
-        var monthDays = persistedSection?.days ?? []
-        if todayTotal > 0.000_001 {
-            if !monthDays.contains(today) {
-                monthDays.append(today)
-                monthDays.sort(by: >)
-            }
-        } else {
-            monthDays.removeAll { $0 == today }
-        }
-
-        if monthDays.isEmpty {
-            overlaidSections.removeAll { $0.id == currentMonth }
-            return overlaidSections
-        }
-
-        let total = monthDays.reduce(0) { partial, day in
-            partial + (day == today ? todayTotal : (dayDurations[day] ?? 0))
-        }
-        let updatedSection = DashboardMonthSection(
-            monthStart: currentMonth,
-            title: currentMonth.monthYearString,
-            average: total / Double(monthDays.count),
-            days: monthDays
-        )
-
-        if let sectionIndex = overlaidSections.firstIndex(where: { $0.id == currentMonth }) {
-            overlaidSections[sectionIndex] = updatedSection
-        } else {
-            overlaidSections.append(updatedSection)
-            overlaidSections.sort { $0.monthStart > $1.monthStart }
-        }
-
-        return overlaidSections
-    }
-
     private func durationForDay(_ day: Date) -> TimeInterval {
-        let persistedDuration = dayDurations[day] ?? 0
-        guard Calendar.current.isDateInToday(day) else { return persistedDuration }
-        let displaySnapshot = timerService.displaySnapshot
-        let liveDuration = displaySnapshot.isRunning ? displaySnapshot.currentIntervalElapsed : 0
-        return persistedDuration + liveDuration
+        displaySnapshot.dayDurations[day] ?? 0
     }
 
     @ViewBuilder

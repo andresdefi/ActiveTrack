@@ -390,6 +390,42 @@ final class PersistenceServiceTests: XCTestCase {
         XCTAssertTrue(store.monthSections.contains { $0.monthStart == oldMonthStart })
     }
 
+    func testDashboardDisplaySnapshotAppliesLiveTimerOverlay() async throws {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        context.insert(
+            ActiveInterval(
+                startDate: calendar.date(bySettingHour: 9, minute: 0, second: 0, of: today)!,
+                endDate: calendar.date(bySettingHour: 10, minute: 0, second: 0, of: today)!
+            )
+        )
+        try context.save()
+
+        let store = DashboardHistoryStore(persistenceService: service)
+        await store.reload()
+        store.updateDisplaySnapshot(
+            timerDisplaySnapshot: TimerDisplaySnapshot(
+                isRunning: true,
+                displayTime: 5_400,
+                currentIntervalElapsed: 1_800
+            )
+        )
+
+        let snapshot = store.displaySnapshot
+        XCTAssertEqual(snapshot.todayText, "1h 30m")
+        XCTAssertEqual(snapshot.dayDurations[today] ?? 0, 5_400, accuracy: 2)
+
+        let todayChartTotal = try XCTUnwrap(snapshot.chartData.daily.first { $0.date == today })
+        XCTAssertEqual(todayChartTotal.duration, 5_400, accuracy: 2)
+
+        let currentMonth = try XCTUnwrap(
+            calendar.date(from: calendar.dateComponents([.year, .month], from: today))
+        )
+        let monthSection = try XCTUnwrap(snapshot.monthSections.first { $0.monthStart == currentMonth })
+        XCTAssertTrue(monthSection.days.contains(today))
+        XCTAssertEqual(monthSection.average, 5_400, accuracy: 2)
+    }
+
     func testDayDurationsAsyncForSpecificDaysReturnsOnlyRequestedDays() async throws {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: .now)
