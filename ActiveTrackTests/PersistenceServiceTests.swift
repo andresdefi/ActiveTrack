@@ -426,6 +426,51 @@ final class PersistenceServiceTests: XCTestCase {
         XCTAssertEqual(monthSection.average, 5_400, accuracy: 2)
     }
 
+    func testDayDetailStoreBuildsDisplaySnapshotWithLiveInterval() async throws {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        let persistedStart = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: today)!
+        let persistedEnd = calendar.date(bySettingHour: 10, minute: 0, second: 0, of: today)!
+        let liveStart = calendar.date(bySettingHour: 10, minute: 0, second: 0, of: today)!
+        let liveEnd = calendar.date(bySettingHour: 10, minute: 30, second: 0, of: today)!
+
+        context.insert(
+            ActiveInterval(
+                startDate: persistedStart,
+                endDate: persistedEnd
+            )
+        )
+        try context.save()
+
+        let store = DayDetailStore(
+            day: today,
+            persistenceService: service,
+            timeDisplayPreference: .twentyFourHour
+        )
+        await store.reload(day: today, timeDisplayPreference: .twentyFourHour)
+        store.updateLiveInterval(
+            DayIntervalSummary(
+                start: liveStart,
+                end: liveEnd,
+                duration: 1_800,
+                isOpen: true,
+                sourceStart: liveStart,
+                sourceEnd: nil
+            ),
+            day: today,
+            timeDisplayPreference: .twentyFourHour
+        )
+
+        let snapshot = store.snapshot
+        XCTAssertEqual(snapshot.rows.count, 2)
+        XCTAssertEqual(snapshot.total, 5_400, accuracy: 1)
+        XCTAssertEqual(snapshot.totalText, "1h 30m")
+        XCTAssertEqual(snapshot.rows[0].timeRangeText, "09:00 – 10:00")
+        XCTAssertEqual(snapshot.rows[0].durationText, "1h 0m")
+        XCTAssertEqual(snapshot.rows[1].timeRangeText, "10:00 – 10:30")
+        XCTAssertTrue(snapshot.rows[1].interval.isOpen)
+    }
+
     func testDayDurationsAsyncForSpecificDaysReturnsOnlyRequestedDays() async throws {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: .now)

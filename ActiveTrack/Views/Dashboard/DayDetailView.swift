@@ -1,41 +1,166 @@
 import SwiftUI
 
+struct DayDetailIntervalRow: Identifiable, Sendable, Hashable {
+    let interval: DayIntervalSummary
+    let timeRangeText: String
+    let durationText: String
+
+    var id: String { interval.id }
+}
+
+struct DayDetailDisplaySnapshot: Sendable, Hashable {
+    static func empty(day: Date, timeDisplayPreference: TimeDisplayPreference) -> DayDetailDisplaySnapshot {
+        DayDetailDisplaySnapshot(
+            day: day,
+            intervals: [],
+            timeDisplayPreference: timeDisplayPreference
+        )
+    }
+
+    let day: Date
+    let titleText: String
+    let total: TimeInterval
+    let totalText: String
+    let rows: [DayDetailIntervalRow]
+
+    var isEmpty: Bool {
+        rows.isEmpty
+    }
+
+    init(
+        day: Date,
+        intervals: [DayIntervalSummary],
+        timeDisplayPreference: TimeDisplayPreference
+    ) {
+        self.day = day
+        self.titleText = day.shortDateString
+        self.total = intervals.reduce(0) { $0 + $1.duration }
+        self.totalText = total.formattedHoursMinutes
+        self.rows = intervals.map { interval in
+            DayDetailIntervalRow(
+                interval: interval,
+                timeRangeText: "\(interval.start.timeString(using: timeDisplayPreference)) – \(interval.end.timeString(using: timeDisplayPreference))",
+                durationText: interval.duration.formattedHoursMinutes
+            )
+        }
+    }
+}
+
+@MainActor
+@Observable
+final class DayDetailStore {
+    private let persistenceService: PersistenceService
+    private(set) var snapshot: DayDetailDisplaySnapshot
+    private var day: Date
+    private var persistedIntervals: [DayIntervalSummary] = []
+    private var liveInterval: DayIntervalSummary?
+    private var timeDisplayPreference: TimeDisplayPreference
+
+    init(day: Date, persistenceService: PersistenceService, timeDisplayPreference: TimeDisplayPreference) {
+        self.day = day
+        self.persistenceService = persistenceService
+        self.timeDisplayPreference = timeDisplayPreference
+        self.snapshot = DayDetailDisplaySnapshot.empty(
+            day: day,
+            timeDisplayPreference: timeDisplayPreference
+        )
+    }
+
+    func reload(day: Date, timeDisplayPreference: TimeDisplayPreference) async {
+        updateInputs(day: day, timeDisplayPreference: timeDisplayPreference)
+        persistedIntervals = (await persistenceService.intervalSummariesForDayAsync(day))
+            .filter { !$0.isOpen }
+        rebuildSnapshot()
+    }
+
+    func updateLiveInterval(
+        _ interval: DayIntervalSummary?,
+        day: Date,
+        timeDisplayPreference: TimeDisplayPreference
+    ) {
+        updateInputs(day: day, timeDisplayPreference: timeDisplayPreference)
+        liveInterval = interval
+        rebuildSnapshot()
+    }
+
+    func updateTimeDisplayPreference(_ preference: TimeDisplayPreference) {
+        guard preference != timeDisplayPreference else { return }
+        timeDisplayPreference = preference
+        rebuildSnapshot()
+    }
+
+    private func updateInputs(day: Date, timeDisplayPreference: TimeDisplayPreference) {
+        guard day != self.day else {
+            self.timeDisplayPreference = timeDisplayPreference
+            return
+        }
+
+        self.day = day
+        self.timeDisplayPreference = timeDisplayPreference
+        persistedIntervals = []
+        liveInterval = nil
+        rebuildSnapshot()
+    }
+
+    private func rebuildSnapshot() {
+        var intervals = persistedIntervals
+        if let liveInterval {
+            intervals.append(liveInterval)
+        }
+
+        snapshot = DayDetailDisplaySnapshot(
+            day: day,
+            intervals: intervals,
+            timeDisplayPreference: timeDisplayPreference
+        )
+    }
+}
+
 struct DayDetailView: View {
     let day: Date
     let timerService: TimerService
     let persistenceService: PersistenceService
 
-    @State private var persistedIntervals: [DayIntervalSummary] = []
-    @State private var liveRefreshToken = 0
+    @State private var dayStore: DayDetailStore
     @State private var intervalPendingEdit: DayIntervalSummary?
     @State private var intervalPendingDeletion: DayIntervalSummary?
     @State private var deletingIntervalID: String?
     @State private var deletionErrorMessage: String?
     @AppStorage(AppPreferenceKey.timeDisplayPreference) private var timeDisplayPreferenceRaw = TimeDisplayPreference.system.rawValue
 
-    private var displayedIntervals: [DayIntervalSummary] {
-        _ = liveRefreshToken
-        var intervals = persistedIntervals
-        if let liveInterval = timerService.liveIntervalForDay(day) {
-            intervals.append(liveInterval)
-        }
-        return intervals
-    }
-
-    private var displayedTotal: TimeInterval {
-        displayedIntervals.reduce(0) { $0 + $1.duration }
+    init(day: Date, timerService: TimerService, persistenceService: PersistenceService) {
+        self.day = day
+        self.timerService = timerService
+        self.persistenceService = persistenceService
+        let timeDisplayPreference = AppPreferences.timeDisplayPreference()
+        _dayStore = State(
+            initialValue: DayDetailStore(
+                day: day,
+                persistenceService: persistenceService,
+                timeDisplayPreference: timeDisplayPreference
+            )
+        )
     }
 
     private var timeDisplayPreference: TimeDisplayPreference {
         TimeDisplayPreference(rawValue: timeDisplayPreferenceRaw) ?? .system
     }
 
+    private var displaySnapshot: DayDetailDisplaySnapshot {
+        guard Calendar.current.isDate(dayStore.snapshot.day, inSameDayAs: day) else {
+            return .empty(day: day, timeDisplayPreference: timeDisplayPreference)
+        }
+        return dayStore.snapshot
+    }
+
     var body: some View {
+        let snapshot = displaySnapshot
+
         VStack(alignment: .leading, spacing: 16) {
-            LiveDayHeader(day: day, total: displayedTotal)
+            LiveDayHeader(title: snapshot.titleText, totalText: snapshot.totalText)
                 .padding(.bottom, 8)
 
-            if displayedIntervals.isEmpty {
+            if snapshot.isEmpty {
                 ContentUnavailableView {
                     Label("No Intervals", systemImage: "clock")
                 } description: {
@@ -43,14 +168,16 @@ struct DayDetailView: View {
                 }
             } else {
                 List {
-                    ForEach(displayedIntervals) { interval in
+                    ForEach(snapshot.rows) { row in
+                        let interval = row.interval
+
                         HStack {
                             VStack(alignment: .leading) {
-                                Text("\(interval.start.timeString(using: timeDisplayPreference)) – \(interval.end.timeString(using: timeDisplayPreference))")
+                                Text(row.timeRangeText)
                                     .font(.body)
                             }
                             Spacer()
-                            Text(interval.duration.formattedHoursMinutes)
+                            Text(row.durationText)
                                 .font(.system(.body, design: .monospaced))
                                 .foregroundStyle(.secondary)
                             if deletingIntervalID == interval.id {
@@ -113,18 +240,30 @@ struct DayDetailView: View {
             }
         }
         .padding()
-        .task(id: day) { await refreshPersistedData() }
+        .task(id: day) {
+            await dayStore.reload(day: day, timeDisplayPreference: timeDisplayPreference)
+            dayStore.updateLiveInterval(
+                liveIntervalForDisplayedDay(),
+                day: day,
+                timeDisplayPreference: timeDisplayPreference
+            )
+        }
         .onReceive(NotificationCenter.default.publisher(for: .activeTrackPersistenceDidChange)) { notification in
             guard let change = notification.object as? PersistenceChange else {
-                Task { await refreshPersistedData() }
+                Task { await reloadDisplayData() }
                 return
             }
             guard change.affects(day: day) else { return }
-            Task { await refreshPersistedData() }
+            Task { await reloadDisplayData() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .activeTrackDisplayTimeChanged)) { _ in
-            guard timerService.isRunning, Calendar.current.isDateInToday(day) else { return }
-            liveRefreshToken &+= 1
+            refreshLiveInterval()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .activeTrackTimerStatusChanged)) { _ in
+            refreshLiveInterval()
+        }
+        .onChange(of: timeDisplayPreferenceRaw) {
+            dayStore.updateTimeDisplayPreference(timeDisplayPreference)
         }
         .sheet(item: $intervalPendingEdit) { interval in
             IntervalEditorSheet(interval: interval) { newStartDate, newEndDate in
@@ -165,9 +304,26 @@ struct DayDetailView: View {
         }
     }
 
-    private func refreshPersistedData() async {
-        persistedIntervals = (await persistenceService.intervalSummariesForDayAsync(day))
-            .filter { !$0.isOpen }
+    private func reloadDisplayData() async {
+        await dayStore.reload(day: day, timeDisplayPreference: timeDisplayPreference)
+        dayStore.updateLiveInterval(
+            liveIntervalForDisplayedDay(),
+            day: day,
+            timeDisplayPreference: timeDisplayPreference
+        )
+    }
+
+    private func refreshLiveInterval() {
+        dayStore.updateLiveInterval(
+            liveIntervalForDisplayedDay(),
+            day: day,
+            timeDisplayPreference: timeDisplayPreference
+        )
+    }
+
+    private func liveIntervalForDisplayedDay() -> DayIntervalSummary? {
+        guard Calendar.current.isDateInToday(day) else { return nil }
+        return timerService.liveIntervalForDay(day)
     }
 
     private var deletionErrorBinding: Binding<Bool> {
@@ -210,15 +366,15 @@ struct DayDetailView: View {
 }
 
 private struct LiveDayHeader: View {
-    let day: Date
-    let total: TimeInterval
+    let title: String
+    let totalText: String
 
     var body: some View {
         HStack {
             VStack(alignment: .leading) {
-                Text(day.shortDateString)
+                Text(title)
                     .font(.title2.bold())
-                Text("Total: \(total.formattedHoursMinutes)")
+                Text("Total: \(totalText)")
                     .font(.title3)
                     .foregroundStyle(.secondary)
             }
