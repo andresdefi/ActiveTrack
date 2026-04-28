@@ -7,7 +7,7 @@ struct MenuBarPopoverView: View {
     @Environment(\.openWindow) private var openWindow
     @AppStorage("lastSeenReleaseNotesVersion") private var lastSeenReleaseNotesVersion = ""
     @State private var showingWhatsNew = false
-    private let currentReleaseNotesVersion = "1.2.10"
+    private let currentReleaseNotesVersion = "1.2.11"
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
@@ -45,7 +45,7 @@ struct MenuBarPopoverView: View {
                     .background(.red.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
                 }
 
-                TodaySummaryView(timerService: timerService)
+                TodaySummaryView(displaySnapshot: timerService.displaySnapshot)
                 TimerControlsView(timerService: timerService)
                 TargetTimerView(timerService: timerService)
 
@@ -124,10 +124,9 @@ struct MenuBarPopoverView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("What's New in \(currentReleaseNotesVersion)")
                 .font(.title3.bold())
-            Text("• Added a real Settings window for launch at login, time format, tracking preferences, notifications, export, and backups")
-            Text("• Cleaned up the popover so Target controls stay hidden until the feature is enabled")
-            Text("• Added CSV and JSON export plus automatic and manual local backups for safer data recovery")
-            Text("• Added a dedicated macOS UI smoke test target with launch-argument-driven app harness coverage")
+            Text("• Cached timer display snapshots so menu bar and dashboard updates do less repeated formatting work")
+            Text("• Kept live dashboard overlays tied to the lightweight timer snapshot path")
+            Text("• Added regression tests for timer display snapshot updates")
             HStack {
                 Spacer()
                 Button("Done") {

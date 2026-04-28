@@ -213,17 +213,18 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private func updateStatusItem() {
         guard let button = statusItem.button else { return }
         let todayStart = calendar.startOfDay(for: .now)
+        let displaySnapshot = timerService.displaySnapshot
 
         if todayStart != trackedDayStart {
             trackedDayStart = todayStart
             hasRunThisDay = false
         }
 
-        if timerService.isRunning {
+        if displaySnapshot.isRunning {
             hasRunThisDay = true
-            applyStatusAppearance(.running, title: " " + timerService.displayTime.compactFormatted, to: button)
-        } else if timerService.todayTotal > 0 || hasRunThisDay {
-            applyStatusAppearance(.paused, title: " " + timerService.displayTime.compactFormatted, to: button)
+            applyStatusAppearance(.running, title: " " + displaySnapshot.compactText, to: button)
+        } else if displaySnapshot.displayTime > 0 || hasRunThisDay {
+            applyStatusAppearance(.paused, title: " " + displaySnapshot.compactText, to: button)
         } else {
             applyStatusAppearance(.idle, title: "", to: button)
         }

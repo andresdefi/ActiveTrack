@@ -588,6 +588,31 @@ final class TimerServiceTests: XCTestCase {
                              "displayTime should grow across pause/resume cycles")
     }
 
+    func testDisplaySnapshotCachesFormattedText() {
+        timer.start()
+        waitFor(0.2)
+        timer.tick()
+
+        let snapshot = timer.displaySnapshot
+        XCTAssertTrue(snapshot.isRunning)
+        XCTAssertEqual(snapshot.displayTime, timer.displayTime, accuracy: 0.2)
+        XCTAssertEqual(snapshot.currentIntervalElapsed, timer.currentIntervalElapsed, accuracy: 0.2)
+        XCTAssertEqual(snapshot.compactText, snapshot.displayTime.compactFormatted)
+        XCTAssertEqual(snapshot.fullText, snapshot.displayTime.formattedHoursMinutes)
+    }
+
+    func testDisplaySnapshotUpdatesAfterPause() {
+        timer.start()
+        waitFor(0.2)
+        timer.pause()
+
+        let snapshot = timer.displaySnapshot
+        XCTAssertFalse(snapshot.isRunning)
+        XCTAssertEqual(snapshot.currentIntervalElapsed, 0, accuracy: 0.1)
+        XCTAssertEqual(snapshot.displayTime, timer.todayTotal, accuracy: 0.5)
+        XCTAssertEqual(snapshot.fullText, timer.displayTime.formattedHoursMinutes)
+    }
+
     func testTodayTotalExcludesRunningInterval() {
         timer.start()
         let exp = expectation(description: "tick")

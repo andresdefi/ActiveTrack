@@ -1,6 +1,7 @@
 import Foundation
 import SwiftData
 import AppKit
+import Observation
 import os.log
 
 enum TimerTargetMode: String, CaseIterable, Identifiable {
@@ -85,6 +86,22 @@ enum HealthLog {
 
 private let logger = Logger(subsystem: "com.activetrack.app", category: "TimerService")
 
+struct TimerDisplaySnapshot: Equatable, Sendable {
+    let isRunning: Bool
+    let displayTime: TimeInterval
+    let currentIntervalElapsed: TimeInterval
+    let compactText: String
+    let fullText: String
+
+    init(isRunning: Bool, displayTime: TimeInterval, currentIntervalElapsed: TimeInterval) {
+        self.isRunning = isRunning
+        self.displayTime = displayTime
+        self.currentIntervalElapsed = currentIntervalElapsed
+        self.compactText = displayTime.compactFormatted
+        self.fullText = displayTime.formattedHoursMinutes
+    }
+}
+
 @MainActor
 @Observable
 final class TimerService {
@@ -109,9 +126,17 @@ final class TimerService {
     private(set) var targetBaseline: TimeInterval = 0
     private(set) var reachedTargetDuration: TimeInterval?
     private(set) var reachedTargetMode: TimerTargetMode?
+    private(set) var displaySnapshot = TimerDisplaySnapshot(
+        isRunning: false,
+        displayTime: 0,
+        currentIntervalElapsed: 0
+    )
 
+    @ObservationIgnored
     private var displayTimer: Timer?
+    @ObservationIgnored
     private var midnightTimer: Timer?
+    @ObservationIgnored
     private var targetTimer: Timer?
     private var displayRefreshVersion = 0
     /// Cached start date of the current interval. Keep timer math on value
@@ -185,6 +210,7 @@ final class TimerService {
         normalizeTargetStateForCurrentDay()
         evaluateTargetIfNeeded()
         refreshTargetDeadline()
+        updateDisplaySnapshot()
         refreshDisplayUpdates()
     }
 
@@ -285,6 +311,7 @@ final class TimerService {
     func refreshTodayTotal() {
         guard persistenceEnabled, let persistenceService else { return }
         todayTotal = persistenceService.durationForDay(.now, completedOnly: true)
+        updateDisplaySnapshot()
         refreshTargetDeadline()
     }
 
@@ -756,10 +783,19 @@ final class TimerService {
 
     private func notifyDisplayTimeDidChange() {
         displayRefreshVersion &+= 1
+        updateDisplaySnapshot()
         NotificationCenter.default.post(name: .activeTrackDisplayTimeChanged, object: nil)
     }
 
     private func notifyStatusDidChange() {
         NotificationCenter.default.post(name: .activeTrackTimerStatusChanged, object: nil)
+    }
+
+    private func updateDisplaySnapshot() {
+        displaySnapshot = TimerDisplaySnapshot(
+            isRunning: isRunning,
+            displayTime: displayTime,
+            currentIntervalElapsed: currentIntervalElapsed
+        )
     }
 }

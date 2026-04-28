@@ -222,7 +222,7 @@ struct DashboardView: View {
                     .foregroundStyle(.secondary)
                 Text("Timer persistence is active, and tracking continues from the menu bar.")
                     .foregroundStyle(.secondary)
-                Text("Current session: \(timerService.displayTime.formattedHoursMinutes)")
+                Text("Current session: \(timerService.displaySnapshot.fullText)")
                     .font(.system(.title3, design: .monospaced, weight: .medium))
                     .padding(.top, 6)
                 Spacer()
@@ -373,7 +373,8 @@ private struct DashboardSidebarView: View {
         }
 
         var overlaidSections = sections
-        let liveDuration = timerService.isRunning ? timerService.currentIntervalElapsed : 0
+        let displaySnapshot = timerService.displaySnapshot
+        let liveDuration = displaySnapshot.isRunning ? displaySnapshot.currentIntervalElapsed : 0
         let todayTotal = (dayDurations[today] ?? 0) + liveDuration
 
         let persistedSection = sections.first(where: { $0.id == currentMonth })
@@ -415,7 +416,8 @@ private struct DashboardSidebarView: View {
     private func durationForDay(_ day: Date) -> TimeInterval {
         let persistedDuration = dayDurations[day] ?? 0
         guard Calendar.current.isDateInToday(day) else { return persistedDuration }
-        let liveDuration = timerService.isRunning ? timerService.currentIntervalElapsed : 0
+        let displaySnapshot = timerService.displaySnapshot
+        let liveDuration = displaySnapshot.isRunning ? displaySnapshot.currentIntervalElapsed : 0
         return persistedDuration + liveDuration
     }
 

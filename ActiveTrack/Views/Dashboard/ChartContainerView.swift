@@ -117,7 +117,7 @@ private struct SelectedHistoryChart: View {
 @MainActor
 private enum HistoryChartOverlay {
     static func overlayDailyTotals(_ items: [DailyTotal], timerService: TimerService) -> [DailyTotal] {
-        let runningElapsed = liveOverlayDuration(timerService: timerService)
+        let runningElapsed = liveOverlayDuration(displaySnapshot: timerService.displaySnapshot)
         guard runningElapsed > 0 else { return items }
         let today = Calendar.current.startOfDay(for: .now)
         if let dailyIndex = items.firstIndex(where: { $0.date == today }) {
@@ -129,7 +129,7 @@ private enum HistoryChartOverlay {
     }
 
     static func overlayWeeklyTotals(_ items: [WeeklyTotal], timerService: TimerService) -> [WeeklyTotal] {
-        let runningElapsed = liveOverlayDuration(timerService: timerService)
+        let runningElapsed = liveOverlayDuration(displaySnapshot: timerService.displaySnapshot)
         guard runningElapsed > 0 else { return items }
 
         let calendar = Calendar.current
@@ -147,7 +147,7 @@ private enum HistoryChartOverlay {
     }
 
     static func overlayMonthlyTotals(_ items: [MonthlyTotal], timerService: TimerService) -> [MonthlyTotal] {
-        let runningElapsed = liveOverlayDuration(timerService: timerService)
+        let runningElapsed = liveOverlayDuration(displaySnapshot: timerService.displaySnapshot)
         guard runningElapsed > 0 else { return items }
 
         let calendar = Calendar.current
@@ -170,9 +170,9 @@ private enum HistoryChartOverlay {
         return total / Double(items.count)
     }
 
-    private static func liveOverlayDuration(timerService: TimerService) -> TimeInterval {
-        guard timerService.isRunning else { return 0 }
-        return timerService.currentIntervalElapsed
+    private static func liveOverlayDuration(displaySnapshot: TimerDisplaySnapshot) -> TimeInterval {
+        guard displaySnapshot.isRunning else { return 0 }
+        return displaySnapshot.currentIntervalElapsed
     }
 }
 
@@ -188,10 +188,12 @@ private struct LiveTodayDashboardMetricCard: View {
     let timerService: TimerService
 
     var body: some View {
+        let displaySnapshot = timerService.displaySnapshot
+
         DashboardMetricCard(
             title: "Today",
-            value: timerService.displayTime.formattedHoursMinutes,
-            caption: timerService.isRunning ? "Live total including current session" : "Tracked so far today"
+            value: displaySnapshot.fullText,
+            caption: displaySnapshot.isRunning ? "Live total including current session" : "Tracked so far today"
         )
     }
 }

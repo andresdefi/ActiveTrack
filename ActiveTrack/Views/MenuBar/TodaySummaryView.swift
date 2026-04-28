@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct TodaySummaryView: View {
-    let timerService: TimerService
+    let displaySnapshot: TimerDisplaySnapshot
 
     var body: some View {
         VStack(spacing: 4) {
@@ -9,12 +9,12 @@ struct TodaySummaryView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            Text(timerService.displayTime.formattedHoursMinutes)
+            Text(displaySnapshot.fullText)
                 .font(.system(.title, design: .monospaced, weight: .medium))
                 .contentTransition(.numericText())
                 .accessibilityIdentifier("activeTrack.todayTotalText")
 
-            if timerService.isRunning {
+            if displaySnapshot.isRunning {
                 HStack(spacing: 4) {
                     Circle()
                         .fill(.green)

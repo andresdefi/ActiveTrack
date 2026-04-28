@@ -10,7 +10,7 @@ struct UITestHarnessView: View {
                 .font(.title2.bold())
                 .accessibilityIdentifier("activeTrack.uiSmokeTitle")
 
-            TodaySummaryView(timerService: timerService)
+            TodaySummaryView(displaySnapshot: timerService.displaySnapshot)
             TimerControlsView(timerService: timerService)
             TargetTimerView(timerService: timerService)
 
