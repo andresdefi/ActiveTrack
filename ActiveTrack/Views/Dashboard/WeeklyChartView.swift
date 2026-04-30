@@ -2,7 +2,7 @@ import SwiftUI
 import Charts
 
 struct WeeklyChartView: View {
-    let data: [WeeklyTotal]
+    let presentation: AggregateChartPresentation<WeeklyChartPoint>
     let metric: AggregateChartMetric
 
     var body: some View {
@@ -16,7 +16,7 @@ struct WeeklyChartView: View {
             }
             .padding(.bottom, 4)
 
-            if data.allSatisfy({ $0.duration == 0 }) {
+            if !presentation.hasData {
                 ContentUnavailableView {
                     Label("No Data", systemImage: "chart.bar")
                 } description: {
@@ -25,17 +25,17 @@ struct WeeklyChartView: View {
                 .frame(maxHeight: .infinity)
             } else {
                 Chart {
-                    ForEach(data) { item in
+                    ForEach(presentation.points) { item in
                         BarMark(
                             x: .value("Week", item.weekStart, unit: .weekOfYear),
-                            y: .value("Hours", chartValue(for: item) / 3600)
+                            y: .value("Hours", chartValue(for: item))
                         )
                         .foregroundStyle(.indigo.gradient)
                         .cornerRadius(4)
                     }
 
                     if averageChartValue > 0 {
-                        RuleMark(y: .value("Average", averageChartValue / 3600))
+                        RuleMark(y: .value("Average", averageChartValue))
                             .foregroundStyle(.secondary)
                             .lineStyle(StrokeStyle(lineWidth: 1, dash: [5, 4]))
                     }
@@ -61,43 +61,30 @@ struct WeeklyChartView: View {
         }
     }
 
-    private var averageDuration: TimeInterval {
-        guard !data.isEmpty else { return 0 }
-        return data.reduce(0) { $0 + $1.duration } / Double(data.count)
-    }
-
-    private var averageChartValue: TimeInterval {
-        guard !data.isEmpty else { return 0 }
-        return data.reduce(0) { $0 + chartValue(for: $1) } / Double(data.count)
-    }
-
     private var summaryText: String {
         switch metric {
         case .total:
-            return "Average: \(averageDuration.formattedHoursMinutes) per week"
+            return presentation.totalSummaryText
         case .averagePerDay:
-            return "Average: \(averageChartValue.formattedHoursMinutes) per day within each week"
+            return presentation.averagePerDaySummaryText
         }
     }
 
-    private func chartValue(for item: WeeklyTotal) -> TimeInterval {
+    private var averageChartValue: Double {
         switch metric {
         case .total:
-            return item.duration
+            return presentation.totalAverageHours
         case .averagePerDay:
-            let divisor = Double(daysInDisplayedWeek(startingAt: item.weekStart))
-            return divisor > 0 ? item.duration / divisor : 0
+            return presentation.averagePerDayAverageHours
         }
     }
 
-    private func daysInDisplayedWeek(startingAt weekStart: Date) -> Int {
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: .now)
-        let currentWeekStart = calendar.date(
-            from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: today)
-        )!
-
-        guard weekStart == currentWeekStart else { return 7 }
-        return max(1, calendar.dateComponents([.day], from: weekStart, to: today).day! + 1)
+    private func chartValue(for item: WeeklyChartPoint) -> Double {
+        switch metric {
+        case .total:
+            return item.totalHours
+        case .averagePerDay:
+            return item.averagePerDayHours
+        }
     }
 }

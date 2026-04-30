@@ -4,7 +4,7 @@ import AppKit
 import Observation
 import os.log
 
-enum TimerTargetMode: String, CaseIterable, Identifiable {
+enum TimerTargetMode: String, CaseIterable, Identifiable, Sendable {
     case fromNow = "from_now"
     case todayTotal = "today_total"
 
@@ -102,6 +102,61 @@ struct TimerDisplaySnapshot: Equatable, Sendable {
     }
 }
 
+struct TimerTargetSnapshot: Equatable, Sendable {
+    static let inactive = TimerTargetSnapshot(
+        targetDuration: nil,
+        targetMode: .todayTotal,
+        remainingTargetTime: nil,
+        reachedTargetDuration: nil,
+        reachedTargetMode: nil
+    )
+
+    let isTargetActive: Bool
+    let hasReachedTarget: Bool
+    let targetDuration: TimeInterval?
+    let targetMode: TimerTargetMode
+    let remainingTargetTime: TimeInterval?
+    let reachedTargetDuration: TimeInterval?
+    let reachedTargetMode: TimerTargetMode?
+    let activeSummaryText: String?
+    let remainingText: String?
+    let reachedDetailText: String
+
+    init(
+        targetDuration: TimeInterval?,
+        targetMode: TimerTargetMode,
+        remainingTargetTime: TimeInterval?,
+        reachedTargetDuration: TimeInterval?,
+        reachedTargetMode: TimerTargetMode?
+    ) {
+        self.isTargetActive = targetDuration != nil
+        self.hasReachedTarget = reachedTargetDuration != nil
+        self.targetDuration = targetDuration
+        self.targetMode = targetMode
+        self.remainingTargetTime = remainingTargetTime
+        self.reachedTargetDuration = reachedTargetDuration
+        self.reachedTargetMode = reachedTargetMode
+
+        if let targetDuration {
+            self.activeSummaryText = "Tracking \(targetDuration.formattedHoursMinutes) \(targetMode.summaryText)"
+        } else {
+            self.activeSummaryText = nil
+        }
+
+        if let remainingTargetTime {
+            self.remainingText = "Remaining: \(remainingTargetTime.formattedHoursMinutes)"
+        } else {
+            self.remainingText = nil
+        }
+
+        if let reachedTargetDuration, let reachedTargetMode {
+            self.reachedDetailText = "Paused at \(reachedTargetDuration.formattedHoursMinutes) \(reachedTargetMode.summaryText). Press Start to keep tracking."
+        } else {
+            self.reachedDetailText = "The timer is paused. Press Start to keep tracking."
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class TimerService {
@@ -131,6 +186,7 @@ final class TimerService {
         displayTime: 0,
         currentIntervalElapsed: 0
     )
+    private(set) var targetSnapshot = TimerTargetSnapshot.inactive
 
     @ObservationIgnored
     private var displayTimer: Timer?
@@ -192,6 +248,7 @@ final class TimerService {
     init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
         loadPersistedTargetState()
+        updateTargetSnapshot()
     }
 
     convenience init(persistenceService: PersistenceService, userDefaults: UserDefaults = .standard) {
@@ -369,6 +426,7 @@ final class TimerService {
         )
         evaluateTargetIfNeeded()
         refreshTargetDeadline()
+        updateTargetSnapshot()
     }
 
     func clearTarget() {
@@ -381,6 +439,7 @@ final class TimerService {
         persistTargetState()
         persistReachedTargetState()
         refreshTargetDeadline()
+        updateTargetSnapshot()
         HealthLog.event("target_cleared")
     }
 
@@ -390,6 +449,7 @@ final class TimerService {
         reachedTargetMode = nil
         reachedTargetReferenceDay = nil
         persistReachedTargetState()
+        updateTargetSnapshot()
         notifyDisplayTimeDidChange()
     }
 
@@ -670,6 +730,7 @@ final class TimerService {
             pause()
         }
 
+        updateTargetSnapshot()
         NotificationCenter.default.post(name: .activeTrackTargetReached, object: nil)
     }
 
@@ -724,6 +785,7 @@ final class TimerService {
 
         persistTargetState()
         persistReachedTargetState()
+        updateTargetSnapshot()
     }
 
     private func loadPersistedTargetState() {
@@ -796,6 +858,17 @@ final class TimerService {
             isRunning: isRunning,
             displayTime: displayTime,
             currentIntervalElapsed: currentIntervalElapsed
+        )
+        updateTargetSnapshot()
+    }
+
+    private func updateTargetSnapshot() {
+        targetSnapshot = TimerTargetSnapshot(
+            targetDuration: targetDuration,
+            targetMode: targetMode,
+            remainingTargetTime: remainingTargetTime,
+            reachedTargetDuration: reachedTargetDuration,
+            reachedTargetMode: reachedTargetMode
         )
     }
 }

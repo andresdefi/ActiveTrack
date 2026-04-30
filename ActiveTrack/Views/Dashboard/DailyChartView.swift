@@ -2,20 +2,20 @@ import SwiftUI
 import Charts
 
 struct DailyChartView: View {
-    let data: [DailyTotal]
+    let presentation: DailyChartPresentation
 
     var body: some View {
         VStack(alignment: .leading) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Last 14 Days")
                     .font(.headline)
-                Text("Average: \(averageDuration.formattedHoursMinutes) per day")
+                Text(presentation.summaryText)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
             .padding(.bottom, 4)
 
-            if data.allSatisfy({ $0.duration == 0 }) {
+            if !presentation.hasData {
                 ContentUnavailableView {
                     Label("No Data", systemImage: "chart.bar")
                 } description: {
@@ -24,17 +24,17 @@ struct DailyChartView: View {
                 .frame(maxHeight: .infinity)
             } else {
                 Chart {
-                    ForEach(data) { item in
+                    ForEach(presentation.points) { item in
                         BarMark(
                             x: .value("Day", item.date, unit: .day),
-                            y: .value("Hours", item.duration / 3600)
+                            y: .value("Hours", item.hours)
                         )
                         .foregroundStyle(.blue.gradient)
                         .cornerRadius(4)
                     }
 
-                    if averageDuration > 0 {
-                        RuleMark(y: .value("Average", averageDuration / 3600))
+                    if presentation.averageHours > 0 {
+                        RuleMark(y: .value("Average", presentation.averageHours))
                             .foregroundStyle(.secondary)
                             .lineStyle(StrokeStyle(lineWidth: 1, dash: [5, 4]))
                     }
@@ -58,10 +58,5 @@ struct DailyChartView: View {
                 .frame(height: 320)
             }
         }
-    }
-
-    private var averageDuration: TimeInterval {
-        guard !data.isEmpty else { return 0 }
-        return data.reduce(0) { $0 + $1.duration } / Double(data.count)
     }
 }

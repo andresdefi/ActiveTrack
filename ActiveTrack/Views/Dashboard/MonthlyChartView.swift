@@ -2,7 +2,7 @@ import SwiftUI
 import Charts
 
 struct MonthlyChartView: View {
-    let data: [MonthlyTotal]
+    let presentation: AggregateChartPresentation<MonthlyChartPoint>
     let metric: AggregateChartMetric
 
     var body: some View {
@@ -16,7 +16,7 @@ struct MonthlyChartView: View {
             }
             .padding(.bottom, 4)
 
-            if data.allSatisfy({ $0.duration == 0 }) {
+            if !presentation.hasData {
                 ContentUnavailableView {
                     Label("No Data", systemImage: "chart.bar")
                 } description: {
@@ -25,17 +25,17 @@ struct MonthlyChartView: View {
                 .frame(maxHeight: .infinity)
             } else {
                 Chart {
-                    ForEach(data) { item in
+                    ForEach(presentation.points) { item in
                         BarMark(
                             x: .value("Month", item.monthStart, unit: .month),
-                            y: .value("Hours", chartValue(for: item) / 3600)
+                            y: .value("Hours", chartValue(for: item))
                         )
                         .foregroundStyle(.teal.gradient)
                         .cornerRadius(4)
                     }
 
                     if averageChartValue > 0 {
-                        RuleMark(y: .value("Average", averageChartValue / 3600))
+                        RuleMark(y: .value("Average", averageChartValue))
                             .foregroundStyle(.secondary)
                             .lineStyle(StrokeStyle(lineWidth: 1, dash: [5, 4]))
                     }
@@ -61,44 +61,30 @@ struct MonthlyChartView: View {
         }
     }
 
-    private var averageDuration: TimeInterval {
-        guard !data.isEmpty else { return 0 }
-        return data.reduce(0) { $0 + $1.duration } / Double(data.count)
-    }
-
-    private var averageChartValue: TimeInterval {
-        guard !data.isEmpty else { return 0 }
-        return data.reduce(0) { $0 + chartValue(for: $1) } / Double(data.count)
-    }
-
     private var summaryText: String {
         switch metric {
         case .total:
-            return "Average: \(averageDuration.formattedHoursMinutes) per month"
+            return presentation.totalSummaryText
         case .averagePerDay:
-            return "Average: \(averageChartValue.formattedHoursMinutes) per day within each month"
+            return presentation.averagePerDaySummaryText
         }
     }
 
-    private func chartValue(for item: MonthlyTotal) -> TimeInterval {
+    private var averageChartValue: Double {
         switch metric {
         case .total:
-            return item.duration
+            return presentation.totalAverageHours
         case .averagePerDay:
-            let divisor = Double(daysInDisplayedMonth(startingAt: item.monthStart))
-            return divisor > 0 ? item.duration / divisor : 0
+            return presentation.averagePerDayAverageHours
         }
     }
 
-    private func daysInDisplayedMonth(startingAt monthStart: Date) -> Int {
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: .now)
-        let currentMonthStart = calendar.date(from: calendar.dateComponents([.year, .month], from: today))!
-
-        if monthStart == currentMonthStart {
-            return max(1, calendar.component(.day, from: today))
+    private func chartValue(for item: MonthlyChartPoint) -> Double {
+        switch metric {
+        case .total:
+            return item.totalHours
+        case .averagePerDay:
+            return item.averagePerDayHours
         }
-
-        return calendar.range(of: .day, in: .month, for: monthStart)?.count ?? 30
     }
 }

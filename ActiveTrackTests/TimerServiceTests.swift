@@ -996,6 +996,33 @@ final class TimerServiceTests: XCTestCase {
         XCTAssertEqual(restoredTimer.targetBaseline, 0, accuracy: 0.01)
     }
 
+    func testTargetSnapshotCachesDisplayTextAndReachedState() {
+        timer.setTarget(duration: 5400, mode: .todayTotal)
+
+        var snapshot = timer.targetSnapshot
+        XCTAssertTrue(snapshot.isTargetActive)
+        XCTAssertFalse(snapshot.hasReachedTarget)
+        XCTAssertEqual(snapshot.targetDuration ?? 0, 5400, accuracy: 0.1)
+        XCTAssertEqual(snapshot.activeSummaryText, "Tracking 1h 30m for today")
+        XCTAssertEqual(snapshot.remainingText, "Remaining: 1h 30m")
+
+        timer.clearTarget()
+        snapshot = timer.targetSnapshot
+        XCTAssertFalse(snapshot.isTargetActive)
+        XCTAssertFalse(snapshot.hasReachedTarget)
+
+        timer.start()
+        timer.setTarget(duration: 0.2, mode: .fromNow)
+        waitFor(0.3)
+        timer.tick()
+
+        snapshot = timer.targetSnapshot
+        XCTAssertFalse(snapshot.isTargetActive)
+        XCTAssertTrue(snapshot.hasReachedTarget)
+        XCTAssertEqual(snapshot.reachedTargetMode, .fromNow)
+        XCTAssertTrue(snapshot.reachedDetailText.contains("Paused at 0h 0m from now"))
+    }
+
     func testResetTodayPostsStatusChangeNotification() {
         timer.start()
         waitFor(0.3)

@@ -12,9 +12,182 @@ struct DashboardMonthSection: Identifiable, Sendable {
     let monthStart: Date
     let title: String
     let average: TimeInterval
+    let averageText: String
     let days: [Date]
+    let dayRows: [DashboardSidebarDay]
 
     var id: Date { monthStart }
+
+    init(monthStart: Date, title: String, average: TimeInterval, days: [Date], dayDurations: [Date: TimeInterval]) {
+        self.monthStart = monthStart
+        self.title = title
+        self.average = average
+        self.averageText = average.formattedHoursMinutes
+        self.days = days
+        self.dayRows = days.map { day in
+            DashboardSidebarDay(
+                day: day,
+                title: day.shortDateString,
+                subtitle: Calendar.current.isDateInToday(day) ? "Today" : nil,
+                durationText: (dayDurations[day] ?? 0).formattedHoursMinutes
+            )
+        }
+    }
+}
+
+struct DashboardSidebarDay: Identifiable, Sendable {
+    let day: Date
+    let title: String
+    let subtitle: String?
+    let durationText: String
+
+    var id: Date { day }
+}
+
+struct DailyChartPoint: Identifiable, Sendable {
+    let date: Date
+    let hours: Double
+
+    var id: Date { date }
+}
+
+struct WeeklyChartPoint: Identifiable, Sendable {
+    let weekStart: Date
+    let totalHours: Double
+    let averagePerDayHours: Double
+
+    var id: Date { weekStart }
+}
+
+struct MonthlyChartPoint: Identifiable, Sendable {
+    let monthStart: Date
+    let totalHours: Double
+    let averagePerDayHours: Double
+
+    var id: Date { monthStart }
+}
+
+struct DailyChartPresentation: Sendable {
+    static let empty = DailyChartPresentation(data: [])
+
+    let points: [DailyChartPoint]
+    let averageHours: Double
+    let summaryText: String
+    let hasData: Bool
+
+    init(data: [DailyTotal]) {
+        points = data.map { DailyChartPoint(date: $0.date, hours: $0.duration / 3600) }
+        let averageDuration = Self.averageDuration(data.map(\.duration))
+        averageHours = averageDuration / 3600
+        summaryText = "Average: \(averageDuration.formattedHoursMinutes) per day"
+        hasData = data.contains { $0.duration > 0 }
+    }
+
+    private static func averageDuration(_ durations: [TimeInterval]) -> TimeInterval {
+        guard !durations.isEmpty else { return 0 }
+        return durations.reduce(0, +) / Double(durations.count)
+    }
+}
+
+struct AggregateChartPresentation<Point: Identifiable & Sendable>: Sendable {
+    let points: [Point]
+    let totalAverageHours: Double
+    let averagePerDayAverageHours: Double
+    let totalSummaryText: String
+    let averagePerDaySummaryText: String
+    let hasData: Bool
+}
+
+struct DashboardChartPresentation: Sendable {
+    static let empty = DashboardChartPresentation(chartData: HistoryChartData(daily: [], weekly: [], monthly: []))
+
+    let daily: DailyChartPresentation
+    let weekly: AggregateChartPresentation<WeeklyChartPoint>
+    let monthly: AggregateChartPresentation<MonthlyChartPoint>
+
+    init(chartData: HistoryChartData, calendar: Calendar = .current, now: Date = .now) {
+        daily = DailyChartPresentation(data: chartData.daily)
+        weekly = Self.weeklyPresentation(data: chartData.weekly, calendar: calendar, now: now)
+        monthly = Self.monthlyPresentation(data: chartData.monthly, calendar: calendar, now: now)
+    }
+
+    private static func weeklyPresentation(
+        data: [WeeklyTotal],
+        calendar: Calendar,
+        now: Date
+    ) -> AggregateChartPresentation<WeeklyChartPoint> {
+        let points = data.map { item in
+            let days = Double(daysInDisplayedWeek(startingAt: item.weekStart, calendar: calendar, now: now))
+            let averagePerDay = days > 0 ? item.duration / days : 0
+            return WeeklyChartPoint(
+                weekStart: item.weekStart,
+                totalHours: item.duration / 3600,
+                averagePerDayHours: averagePerDay / 3600
+            )
+        }
+        let totalAverage = averageDuration(data.map(\.duration))
+        let averagePerDayAverage = averageDuration(points.map { $0.averagePerDayHours * 3600 })
+        return AggregateChartPresentation(
+            points: points,
+            totalAverageHours: totalAverage / 3600,
+            averagePerDayAverageHours: averagePerDayAverage / 3600,
+            totalSummaryText: "Average: \(totalAverage.formattedHoursMinutes) per week",
+            averagePerDaySummaryText: "Average: \(averagePerDayAverage.formattedHoursMinutes) per day within each week",
+            hasData: data.contains { $0.duration > 0 }
+        )
+    }
+
+    private static func monthlyPresentation(
+        data: [MonthlyTotal],
+        calendar: Calendar,
+        now: Date
+    ) -> AggregateChartPresentation<MonthlyChartPoint> {
+        let points = data.map { item in
+            let days = Double(daysInDisplayedMonth(startingAt: item.monthStart, calendar: calendar, now: now))
+            let averagePerDay = days > 0 ? item.duration / days : 0
+            return MonthlyChartPoint(
+                monthStart: item.monthStart,
+                totalHours: item.duration / 3600,
+                averagePerDayHours: averagePerDay / 3600
+            )
+        }
+        let totalAverage = averageDuration(data.map(\.duration))
+        let averagePerDayAverage = averageDuration(points.map { $0.averagePerDayHours * 3600 })
+        return AggregateChartPresentation(
+            points: points,
+            totalAverageHours: totalAverage / 3600,
+            averagePerDayAverageHours: averagePerDayAverage / 3600,
+            totalSummaryText: "Average: \(totalAverage.formattedHoursMinutes) per month",
+            averagePerDaySummaryText: "Average: \(averagePerDayAverage.formattedHoursMinutes) per day within each month",
+            hasData: data.contains { $0.duration > 0 }
+        )
+    }
+
+    private static func averageDuration(_ durations: [TimeInterval]) -> TimeInterval {
+        guard !durations.isEmpty else { return 0 }
+        return durations.reduce(0, +) / Double(durations.count)
+    }
+
+    private static func daysInDisplayedWeek(startingAt weekStart: Date, calendar: Calendar, now: Date) -> Int {
+        let today = calendar.startOfDay(for: now)
+        let currentWeekStart = calendar.date(
+            from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: today)
+        )!
+
+        guard weekStart == currentWeekStart else { return 7 }
+        return max(1, calendar.dateComponents([.day], from: weekStart, to: today).day! + 1)
+    }
+
+    private static func daysInDisplayedMonth(startingAt monthStart: Date, calendar: Calendar, now: Date) -> Int {
+        let today = calendar.startOfDay(for: now)
+        let currentMonthStart = calendar.date(from: calendar.dateComponents([.year, .month], from: today))!
+
+        if monthStart == currentMonthStart {
+            return max(1, calendar.component(.day, from: today))
+        }
+
+        return calendar.range(of: .day, in: .month, for: monthStart)?.count ?? 30
+    }
 }
 
 struct DashboardDisplaySnapshot: Sendable {
@@ -26,6 +199,7 @@ struct DashboardDisplaySnapshot: Sendable {
     )
 
     let chartData: HistoryChartData
+    let chartPresentation: DashboardChartPresentation
     let monthSections: [DashboardMonthSection]
     let dayDurations: [Date: TimeInterval]
     let todayText: String
@@ -45,6 +219,7 @@ struct DashboardDisplaySnapshot: Sendable {
         let overlaidDayDurations = Self.overlayDayDurations(dayDurations, liveDuration: liveDuration)
 
         self.chartData = overlaidChartData
+        self.chartPresentation = DashboardChartPresentation(chartData: overlaidChartData)
         self.monthSections = Self.overlayMonthSections(
             monthSections,
             dayDurations: overlaidDayDurations
@@ -156,7 +331,8 @@ struct DashboardDisplaySnapshot: Sendable {
             monthStart: currentMonth,
             title: currentMonth.monthYearString,
             average: total / Double(monthDays.count),
-            days: monthDays
+            days: monthDays,
+            dayDurations: dayDurations
         )
 
         if let sectionIndex = overlaidSections.firstIndex(where: { $0.id == currentMonth }) {
@@ -183,6 +359,18 @@ extension DailyTotal: DashboardDurationReadable {}
 extension WeeklyTotal: DashboardDurationReadable {}
 extension MonthlyTotal: DashboardDurationReadable {}
 
+private struct DashboardTimerDisplayKey: Equatable {
+    let isRunning: Bool
+    let displayMinute: Int
+    let liveMinute: Int
+
+    init(_ snapshot: TimerDisplaySnapshot) {
+        isRunning = snapshot.isRunning
+        displayMinute = Int(max(snapshot.displayTime, 0) / 60)
+        liveMinute = Int(max(snapshot.currentIntervalElapsed, 0) / 60)
+    }
+}
+
 @MainActor
 @Observable
 final class DashboardHistoryStore {
@@ -201,6 +389,7 @@ final class DashboardHistoryStore {
         displayTime: 0,
         currentIntervalElapsed: 0
     )
+    private var latestTimerDisplayKey: DashboardTimerDisplayKey?
 
     init(persistenceService: PersistenceService) {
         self.persistenceService = persistenceService
@@ -255,8 +444,11 @@ final class DashboardHistoryStore {
         )
     }
 
-    func updateDisplaySnapshot(timerDisplaySnapshot: TimerDisplaySnapshot) {
+    func updateDisplaySnapshot(timerDisplaySnapshot: TimerDisplaySnapshot, force: Bool = false) {
         latestTimerDisplaySnapshot = timerDisplaySnapshot
+        let timerDisplayKey = DashboardTimerDisplayKey(timerDisplaySnapshot)
+        guard force || timerDisplayKey != latestTimerDisplayKey else { return }
+        latestTimerDisplayKey = timerDisplayKey
         rebuildDisplaySnapshot(reason: "timer")
     }
 
@@ -314,7 +506,8 @@ final class DashboardHistoryStore {
                     monthStart: monthStart,
                     title: monthStart.monthYearString,
                     average: average,
-                    days: monthDays
+                    days: monthDays,
+                    dayDurations: dayDurations
                 )
             }
     }
@@ -350,7 +543,8 @@ final class DashboardHistoryStore {
                 monthStart: monthStart,
                 title: monthStart.monthYearString,
                 average: total / Double(monthDays.count),
-                days: monthDays
+                days: monthDays,
+                dayDurations: dayDurations
             )
         }
 
@@ -541,14 +735,14 @@ private struct DashboardSidebarView: View {
                             )
                         ) {
                             VStack(spacing: 6) {
-                                ForEach(section.days, id: \.self) { day in
+                                ForEach(section.dayRows) { row in
                                     sidebarButton(
-                                        title: day.shortDateString,
-                                        subtitle: Calendar.current.isDateInToday(day) ? "Today" : nil,
-                                        trailing: durationForDay(day).formattedHoursMinutes,
-                                        isSelected: selectedItem == .day(day)
+                                        title: row.title,
+                                        subtitle: row.subtitle,
+                                        trailing: row.durationText,
+                                        isSelected: selectedItem == .day(row.day)
                                     ) {
-                                        selectedItem = .day(day)
+                                        selectedItem = .day(row.day)
                                         splitVisibility = .all
                                     }
                                 }
@@ -567,7 +761,7 @@ private struct DashboardSidebarView: View {
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                Text(section.average.formattedHoursMinutes)
+                                Text(section.averageText)
                                     .font(.system(.body, design: .monospaced))
                                     .foregroundStyle(.secondary)
                             }
@@ -578,10 +772,6 @@ private struct DashboardSidebarView: View {
             }
             .padding(12)
         }
-    }
-
-    private func durationForDay(_ day: Date) -> TimeInterval {
-        displaySnapshot.dayDurations[day] ?? 0
     }
 
     @ViewBuilder

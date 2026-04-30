@@ -12,7 +12,7 @@ struct UITestHarnessView: View {
 
             TodaySummaryView(displaySnapshot: timerService.displaySnapshot)
             TimerControlsView(timerService: timerService)
-            TargetTimerView(timerService: timerService)
+            TargetTimerView(targetSnapshot: timerService.targetSnapshot, timerService: timerService)
 
             Divider()
 

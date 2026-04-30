@@ -7,7 +7,7 @@ struct MenuBarPopoverView: View {
     @Environment(\.openWindow) private var openWindow
     @AppStorage("lastSeenReleaseNotesVersion") private var lastSeenReleaseNotesVersion = ""
     @State private var showingWhatsNew = false
-    private let currentReleaseNotesVersion = "1.2.13"
+    private let currentReleaseNotesVersion = "1.2.14"
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
@@ -47,7 +47,7 @@ struct MenuBarPopoverView: View {
 
                 TodaySummaryView(displaySnapshot: timerService.displaySnapshot)
                 TimerControlsView(timerService: timerService)
-                TargetTimerView(timerService: timerService)
+                TargetTimerView(targetSnapshot: timerService.targetSnapshot, timerService: timerService)
 
                 Divider()
 
@@ -124,9 +124,9 @@ struct MenuBarPopoverView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("What's New in \(currentReleaseNotesVersion)")
                 .font(.title3.bold())
-            Text("• Cached Day Detail display snapshots so interval rows do less repeated work")
-            Text("• Preformatted Day Detail totals and interval rows outside the render path")
-            Text("• Added regression coverage for live interval display snapshots")
+            Text("• Coalesced live dashboard timer refreshes to reduce sub-minute rebuilds")
+            Text("• Precomputed dashboard chart and sidebar presentation data")
+            Text("• Cached target timer display text in a focused snapshot")
             HStack {
                 Spacer()
                 Button("Done") {
@@ -144,6 +144,7 @@ struct MenuBarPopoverView: View {
 }
 
 struct TargetTimerView: View {
+    let targetSnapshot: TimerTargetSnapshot
     let timerService: TimerService
 
     @AppStorage("targetTimerDraftHours") private var draftHours = 6
@@ -165,7 +166,7 @@ struct TargetTimerView: View {
     }
 
     private var isTargetVisible: Bool {
-        targetSectionEnabled || timerService.isTargetActive || timerService.hasReachedTarget
+        targetSectionEnabled || targetSnapshot.isTargetActive || targetSnapshot.hasReachedTarget
     }
 
     private var targetToggleBinding: Binding<Bool> {
@@ -192,9 +193,9 @@ struct TargetTimerView: View {
 
                 Spacer()
 
-                if timerService.hasReachedTarget {
+                if targetSnapshot.hasReachedTarget {
                     statusPill(title: "Reached", color: .orange)
-                } else if timerService.isTargetActive {
+                } else if targetSnapshot.isTargetActive {
                     statusPill(title: "Active", color: .blue)
                 }
 
@@ -204,9 +205,9 @@ struct TargetTimerView: View {
             }
 
             if isTargetVisible {
-                if timerService.hasReachedTarget {
+                if targetSnapshot.hasReachedTarget {
                     reachedCard
-                } else if timerService.isTargetActive {
+                } else if targetSnapshot.isTargetActive {
                     activeCard
                 }
 
@@ -238,7 +239,7 @@ struct TargetTimerView: View {
                 .labelsHidden()
 
                 HStack {
-                    Button(timerService.isTargetActive ? "Update Target" : "Set Target") {
+                    Button(targetSnapshot.isTargetActive ? "Update Target" : "Set Target") {
                         targetSectionEnabled = true
                         timerService.setTarget(duration: selectedDuration, mode: selectedMode.wrappedValue)
                     }
@@ -247,12 +248,12 @@ struct TargetTimerView: View {
 
                     Spacer()
 
-                    if timerService.hasReachedTarget {
+                    if targetSnapshot.hasReachedTarget {
                         Button("Dismiss") {
                             timerService.dismissReachedTarget()
                         }
                         .buttonStyle(.borderless)
-                    } else if timerService.isTargetActive {
+                    } else if targetSnapshot.isTargetActive {
                         Button("Clear") {
                             timerService.clearTarget()
                         }
@@ -270,18 +271,18 @@ struct TargetTimerView: View {
         .onAppear {
             syncDraftWithTargetIfNeeded()
         }
-        .onChange(of: timerService.targetDuration) {
+        .onChange(of: targetSnapshot.targetDuration) {
             syncDraftWithTargetIfNeeded()
         }
     }
 
     private var activeCard: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if let targetDuration = timerService.targetDuration {
-                Text("Tracking \(targetDuration.formattedHoursMinutes) \(timerService.targetMode.summaryText)")
+            if let activeSummaryText = targetSnapshot.activeSummaryText {
+                Text(activeSummaryText)
                     .font(.subheadline.weight(.semibold))
-                if let remainingTargetTime = timerService.remainingTargetTime {
-                    Text("Remaining: \(remainingTargetTime.formattedHoursMinutes)")
+                if let remainingText = targetSnapshot.remainingText {
+                    Text(remainingText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -295,16 +296,9 @@ struct TargetTimerView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Time reached")
                 .font(.subheadline.weight(.semibold))
-            if let reachedTargetDuration = timerService.reachedTargetDuration,
-               let reachedTargetMode = timerService.reachedTargetMode {
-                Text("Paused at \(reachedTargetDuration.formattedHoursMinutes) \(reachedTargetMode.summaryText). Press Start to keep tracking.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("The timer is paused. Press Start to keep tracking.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            Text(targetSnapshot.reachedDetailText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
         .padding(10)
         .background(Color.orange.opacity(0.14), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -320,8 +314,8 @@ struct TargetTimerView: View {
     }
 
     private func syncDraftWithTargetIfNeeded() {
-        guard let targetDuration = timerService.targetDuration else { return }
-        draftModeRaw = timerService.targetMode.rawValue
+        guard let targetDuration = targetSnapshot.targetDuration else { return }
+        draftModeRaw = targetSnapshot.targetMode.rawValue
         let totalMinutes = Int(targetDuration / 60)
         draftHours = min(totalMinutes / 60, 24)
         draftMinutes = minuteOptions.min(by: { abs($0 - (totalMinutes % 60)) < abs($1 - (totalMinutes % 60)) }) ?? 0

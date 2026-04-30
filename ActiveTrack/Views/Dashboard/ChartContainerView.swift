@@ -40,7 +40,7 @@ struct ChartContainerView: View {
 
                 DashboardMetricsGrid(displaySnapshot: displaySnapshot)
                 SelectedHistoryChart(
-                    chartData: displaySnapshot.chartData,
+                    chartPresentation: displaySnapshot.chartPresentation,
                     selectedPeriod: selectedPeriod,
                     aggregateMetric: aggregateMetric
                 )
@@ -80,22 +80,22 @@ private struct DashboardMetricsGrid: View {
 }
 
 private struct SelectedHistoryChart: View {
-    let chartData: HistoryChartData
+    let chartPresentation: DashboardChartPresentation
     let selectedPeriod: ChartPeriod
     let aggregateMetric: AggregateChartMetric
 
     var body: some View {
         switch selectedPeriod {
         case .daily:
-            DailyChartView(data: chartData.daily)
+            DailyChartView(presentation: chartPresentation.daily)
         case .weekly:
             WeeklyChartView(
-                data: chartData.weekly,
+                presentation: chartPresentation.weekly,
                 metric: aggregateMetric
             )
         case .monthly:
             MonthlyChartView(
-                data: chartData.monthly,
+                presentation: chartPresentation.monthly,
                 metric: aggregateMetric
             )
         }
