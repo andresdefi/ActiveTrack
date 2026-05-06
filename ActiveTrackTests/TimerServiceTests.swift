@@ -441,6 +441,29 @@ final class TimerServiceTests: XCTestCase {
         XCTAssertTrue(calendar.isDateInToday(open!.startDate))
     }
 
+    func testTickAfterMissedMidnightSplitsRunningInterval() {
+        timer.start()
+
+        let calendar = Calendar.current
+        let originalOpen = persistence.fetchOpenInterval()
+        XCTAssertNotNil(originalOpen)
+        let originalStart = originalOpen!.startDate
+        let originalDayStart = calendar.startOfDay(for: originalStart)
+        let nextDayStart = calendar.date(byAdding: .day, value: 1, to: originalDayStart)!
+        let afterMissedMidnight = nextDayStart.addingTimeInterval(7 * 60)
+
+        timer.tick(now: afterMissedMidnight)
+
+        XCTAssertTrue(timer.isRunning)
+        let newOpen = persistence.fetchOpenInterval()
+        XCTAssertNotNil(newOpen)
+        XCTAssertEqual(newOpen!.startDate.timeIntervalSince1970, nextDayStart.timeIntervalSince1970, accuracy: 1)
+
+        let closedOriginal = persistence.fetchAllIntervals().first { $0.startDate == originalStart && $0.endDate != nil }
+        XCTAssertNotNil(closedOriginal)
+        XCTAssertEqual(closedOriginal!.endDate!.timeIntervalSince1970, nextDayStart.timeIntervalSince1970, accuracy: 1)
+    }
+
     // MARK: - Sleep / Wake
 
     func testSleepPausesRunningTimer() {
@@ -865,8 +888,11 @@ final class TimerServiceTests: XCTestCase {
         let i1 = ActiveInterval(startDate: i1Start, endDate: i1End)
         let i2 = ActiveInterval(startDate: i2Start, endDate: i2End)
 
-        // One open interval (still running)
-        let i3 = ActiveInterval(startDate: Date.now.addingTimeInterval(-1800))
+        // One open interval (still running), kept safely inside today so this
+        // test remains stable when it runs shortly after midnight.
+        let elapsedToday = Date.now.timeIntervalSince(todayStart)
+        let openElapsed = max(1, min(elapsedToday / 2, 1800))
+        let i3 = ActiveInterval(startDate: Date.now.addingTimeInterval(-openElapsed))
 
         context.insert(i1)
         context.insert(i2)
@@ -878,8 +904,8 @@ final class TimerServiceTests: XCTestCase {
         // todayTotal should include the 2 completed intervals (2h = 7200s)
         XCTAssertEqual(newTimer.todayTotal, 7200, accuracy: 5)
 
-        // displayTime should be todayTotal + current elapsed (~30 min)
-        XCTAssertEqual(newTimer.displayTime, 7200 + 1800, accuracy: 10)
+        // displayTime should be todayTotal + current elapsed
+        XCTAssertEqual(newTimer.displayTime, 7200 + openElapsed, accuracy: 10)
     }
 
     // MARK: - Target Timer

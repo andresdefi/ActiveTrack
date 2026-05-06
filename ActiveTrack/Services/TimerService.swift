@@ -365,9 +365,17 @@ final class TimerService {
         }
     }
 
-    func refreshTodayTotal() {
+    func refreshTodayTotal(now: Date = .now) {
         guard persistenceEnabled, let persistenceService else { return }
-        todayTotal = persistenceService.durationForDay(.now, completedOnly: true)
+        if rollOverCurrentIntervalIfNeeded(now: now) {
+            return
+        }
+
+        refreshTodayTotal(for: now, persistenceService: persistenceService)
+    }
+
+    private func refreshTodayTotal(for date: Date, persistenceService: PersistenceService) {
+        todayTotal = persistenceService.durationForDay(date, completedOnly: true)
         updateDisplaySnapshot()
         refreshTargetDeadline()
     }
@@ -586,6 +594,10 @@ final class TimerService {
     }
 
     private func handleDisplayTimerFired() {
+        if rollOverCurrentIntervalIfNeeded() {
+            return
+        }
+
         notifyDisplayTimeDidChange()
         evaluateTargetIfNeeded()
         if isRunning {
@@ -594,7 +606,11 @@ final class TimerService {
     }
 
     // Internal for @testable access in tests
-    func tick() {
+    func tick(now: Date = .now) {
+        if rollOverCurrentIntervalIfNeeded(now: now) {
+            return
+        }
+
         notifyDisplayTimeDidChange()
         evaluateTargetIfNeeded()
     }
@@ -614,13 +630,13 @@ final class TimerService {
     }
 
     // Internal for @testable access in tests
-    func handleMidnightRollover() {
+    func handleMidnightRollover(now: Date = .now) {
         clearTargetForNewDay()
 
         if !persistenceEnabled {
             let calendar = Calendar.current
-            if isRunning, let startDate = currentIntervalStartDate, !calendar.isDateInToday(startDate) {
-                let todayStart = calendar.startOfDay(for: .now)
+            let todayStart = calendar.startOfDay(for: now)
+            if isRunning, let startDate = currentIntervalStartDate, calendar.startOfDay(for: startDate) < todayStart {
                 todayTotal = 0
                 currentIntervalStartDate = todayStart
             } else if !isRunning {
@@ -634,20 +650,24 @@ final class TimerService {
         }
 
         if isRunning, let persistenceService, let startDate = currentIntervalStartDate {
-            // Only split the interval if it actually started before today.
-            guard !Calendar.current.isDateInToday(startDate) else {
-                refreshTodayTotal()
+            let calendar = Calendar.current
+            let todayStart = calendar.startOfDay(for: now)
+
+            // Only split the interval if it actually started before the current local day.
+            guard calendar.startOfDay(for: startDate) < todayStart else {
+                refreshTodayTotal(for: now, persistenceService: persistenceService)
                 scheduleMidnightRollover()
                 return
             }
 
-            let calendar = Calendar.current
-            let todayStart = calendar.startOfDay(for: .now)
-
             do {
                 // Multi-day gap: create one closed interval per day boundary
                 var currentStart = startDate
-                var nextMidnight = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 1, to: currentStart)!)
+                var nextMidnight = calendar.date(
+                    byAdding: .day,
+                    value: 1,
+                    to: calendar.startOfDay(for: currentStart)
+                )!
 
                 // Close the original interval at the first midnight boundary.
                 if let openInterval = persistenceService.fetchOpenInterval() {
@@ -657,7 +677,7 @@ final class TimerService {
 
                 // Create intermediate day intervals for any days between start and today
                 while currentStart < todayStart {
-                    nextMidnight = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 1, to: currentStart)!)
+                    nextMidnight = calendar.date(byAdding: .day, value: 1, to: currentStart)!
                     let endOfDay = min(nextMidnight, todayStart)
                     try persistenceService.createInterval(startDate: currentStart)
                     if let intermediateInterval = persistenceService.fetchOpenInterval() {
@@ -677,11 +697,26 @@ final class TimerService {
             }
         }
 
-        refreshTodayTotal()
+        if let persistenceService {
+            refreshTodayTotal(for: now, persistenceService: persistenceService)
+        }
         refreshDisplayUpdates()
         notifyDisplayTimeDidChange()
         scheduleMidnightRollover()
         notifyStatusDidChange()
+    }
+
+    @discardableResult
+    private func rollOverCurrentIntervalIfNeeded(now: Date = .now) -> Bool {
+        guard isRunning, let startDate = currentIntervalStartDate else { return false }
+
+        let calendar = Calendar.current
+        let startDay = calendar.startOfDay(for: startDate)
+        let currentDay = calendar.startOfDay(for: now)
+        guard startDay < currentDay else { return false }
+
+        handleMidnightRollover(now: now)
+        return true
     }
 
     @discardableResult
